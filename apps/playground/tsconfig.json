@@ -1,0 +1,4 @@
+{
+  "extends": "@dna/typescript-config/react-library.json",
+  "include": ["src", "vite.config.ts"]
+}

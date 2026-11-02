@@ -1,20 +1,29 @@
-# Introduction 
-TODO: Give a short introduction of your project. Let this section explain the objectives or the motivation behind this project. 
+# DNA Data Grid
 
-# Getting Started
-TODO: Guide users through getting your code up and running on their own system. In this section you can talk about:
-1.	Installation process
-2.	Software dependencies
-3.	Latest releases
-4.	API references
+A React data grid inspired by the features, structure and usage of [MUI X Data Grid](https://mui.com/x/react-data-grid/).
 
-# Build and Test
-TODO: Describe and show how to build your code and run the tests. 
+## Layout
 
-# Contribute
-TODO: Explain how other users and developers can contribute to make your code better. 
+| Path | Description |
+| --- | --- |
+| `packages/data-grid` | `@dna/data-grid`, the grid library |
+| `packages/typescript-config` | Shared `tsconfig` presets |
+| `apps/playground` | Vite app for trying the grid during development |
 
-If you want to learn more about creating good readme files then refer the following [guidelines](https://docs.microsoft.com/en-us/azure/devops/repos/git/create-a-readme?view=azure-devops). You can also seek inspiration from the below readme files:
-- [ASP.NET Core](https://github.com/aspnet/Home)
-- [Visual Studio Code](https://github.com/Microsoft/vscode)
-- [Chakra Core](https://github.com/Microsoft/ChakraCore)
+## Getting started
+
+Requires Node 20+ and pnpm (`corepack enable`).
+
+```bash
+pnpm install
+pnpm dev
+```
+
+## Scripts
+
+| Command | Description |
+| --- | --- |
+| `pnpm build` | Build all packages and apps |
+| `pnpm dev` | Watch the library and run the playground |
+| `pnpm typecheck` | Type-check every workspace |
+| `pnpm test` | Run unit tests |
