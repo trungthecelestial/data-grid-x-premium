@@ -2,11 +2,13 @@ import CheckIcon from '@mui/icons-material/Check';
 import CloseIcon from '@mui/icons-material/Close';
 import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown';
 import KeyboardArrowRightIcon from '@mui/icons-material/KeyboardArrowRight';
+import MoreVertIcon from '@mui/icons-material/MoreVert';
 import Box from '@mui/material/Box';
 import Checkbox from '@mui/material/Checkbox';
 import IconButton from '@mui/material/IconButton';
 import LinearProgress from '@mui/material/LinearProgress';
 import Paper from '@mui/material/Paper';
+import Popover from '@mui/material/Popover';
 import Table from '@mui/material/Table';
 import TableBody from '@mui/material/TableBody';
 import TableCell from '@mui/material/TableCell';
@@ -30,9 +32,13 @@ import {
   type ReactNode,
 } from 'react';
 import { GridCellEditor } from './components/GridCellEditor';
+import { GridColumnMenu, getAvailableAggregationFunctions } from './components/GridColumnMenu';
+import { GridColumnsPanel } from './components/GridColumnsPanel';
+import { GridFilterPanel } from './components/GridFilterPanel';
 import { GridToolbar } from './components/GridToolbar';
 import type {
   DataGridProps,
+  GridAggregationModel,
   GridApi,
   GridApiRef,
   GridColDef,
@@ -53,6 +59,7 @@ import {
   resolveColumnWidths,
 } from './features/columns';
 import { buildCsv, buildPrintHtml, downloadFile, printHtml } from './features/export';
+import { getColumnFilterOperators, getInitialFilterValue, isFilterable } from './features/filtering';
 import { applySortClick, DEFAULT_SORTING_ORDER } from './features/sorting';
 import type { GridTreeNode } from './features/tree';
 import { useElementSize } from './hooks/useElementSize';
@@ -100,6 +107,8 @@ const ellipsisSx = { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: '
 
 const JUSTIFY = { left: 'flex-start', center: 'center', right: 'flex-end' } as const;
 
+const menuButtonShownSx = { width: 24, p: 0.25, opacity: 1, mx: 0.25 } as const;
+
 type Entry<R extends GridValidRowModel> =
   | { kind: 'row'; node: GridTreeNode<R> }
   | { kind: 'detail'; node: GridTreeNode<R>; height: number };
@@ -146,6 +155,9 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     disableColumnFilter = false,
     disableColumnResize = false,
     disableColumnReorder = false,
+    disableColumnMenu = false,
+    disableRowGrouping = false,
+    disableAggregation = false,
     editMode = 'cell',
     processRowUpdate,
     onProcessRowUpdateError,
@@ -195,8 +207,18 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     props.onDetailPanelExpandedRowIdsChange as ((ids: readonly GridRowId[]) => void) | undefined,
   );
 
-  const aggregationModel = props.aggregationModel ?? initialState?.aggregation?.model ?? EMPTY_OBJECT;
-  const rowGroupingModel = props.rowGroupingModel ?? initialState?.rowGrouping?.model ?? EMPTY_STRINGS;
+  const [aggregationModel, setAggregationModel] = useGridState<GridAggregationModel>(
+    props.aggregationModel,
+    initialState?.aggregation?.model ?? EMPTY_OBJECT,
+    props.onAggregationModelChange,
+  );
+  const [rowGroupingModel, setRowGroupingModel] = useGridState<readonly string[]>(
+    props.rowGroupingModel,
+    initialState?.rowGrouping?.model ?? EMPTY_STRINGS,
+    props.onRowGroupingModelChange as ((model: readonly string[]) => void) | undefined,
+  );
+  const [columnMenu, setColumnMenu] = useState<{ field: string; anchor: HTMLElement } | null>(null);
+  const [menuPanel, setMenuPanel] = useState<{ kind: 'filter' | 'columns'; anchor: HTMLElement } | null>(null);
 
   const [columnOrder, setColumnOrder] = useState<string[]>(
     () => initialState?.columns?.orderedFields ?? userColumns.map((column) => column.field),
@@ -647,6 +669,77 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     setSortModel(applySortClick(sortModel, column.field, sortingOrder, event.shiftKey && !disableMultipleColumnsSorting));
   };
 
+  const isSortable = (column: GridColDef<R>) =>
+    !disableColumnSorting && column.sortable !== false && !SPECIAL_FIELDS.has(column.field) && column.type !== 'actions';
+
+  const hasColumnMenu = (column: GridColDef<R>) =>
+    !disableColumnMenu && !column.disableColumnMenu && (!SPECIAL_FIELDS.has(column.field) || column.field === ROW_GROUP_FIELD);
+
+  // The panels open under the header cell, not under the menu button.
+  const headerCellOf = (anchor: HTMLElement) => anchor.closest<HTMLElement>('[role="columnheader"]') ?? anchor;
+
+  const openFilterFor = (column: GridColDef<R>, anchor: HTMLElement) => {
+    if (!filterModel.items.some((item) => item.field === column.field)) {
+      const operator = getColumnFilterOperators(column)[0];
+      setFilterModel({
+        ...filterModel,
+        items: [
+          ...filterModel.items,
+          { id: `filter-${Date.now()}`, field: column.field, operator: operator?.value ?? 'contains', value: getInitialFilterValue(operator) },
+        ],
+      });
+    }
+    setMenuPanel({ kind: 'filter', anchor: headerCellOf(anchor) });
+  };
+
+  const renderColumnMenu = () => {
+    if (columnMenu?.field === ROW_GROUP_FIELD) {
+      const groupColumn = columns.find((candidate) => candidate.field === ROW_GROUP_FIELD);
+      return groupColumn ? (
+        <GridColumnMenu
+          column={groupColumn}
+          anchorEl={columnMenu.anchor}
+          onClose={() => setColumnMenu(null)}
+          localeText={localeText}
+          groupedColumns={rowGroupingModel.flatMap((field) => userColumnMap.get(field) ?? [])}
+          onUngroup={(field) => setRowGroupingModel(rowGroupingModel.filter((item) => item !== field))}
+          onManageColumns={() => setMenuPanel({ kind: 'columns', anchor: headerCellOf(columnMenu.anchor) })}
+        />
+      ) : null;
+    }
+    const column = columnMenu ? userColumnMap.get(columnMenu.field) : undefined;
+    if (!columnMenu || !column) {
+      return null;
+    }
+    const { field, anchor } = columnMenu;
+    const aggregationFunctions = disableAggregation ? [] : getAvailableAggregationFunctions(column);
+    return (
+      <GridColumnMenu
+        column={column}
+        anchorEl={anchor}
+        onClose={() => setColumnMenu(null)}
+        localeText={localeText}
+        sortDirection={sortModel.find((item) => item.field === field)?.sort}
+        onSort={isSortable(column) ? (direction) => setSortModel(direction ? [{ field, sort: direction }] : sortModel.filter((item) => item.field !== field)) : undefined}
+        onFilter={!disableColumnFilter && isFilterable(column) ? () => openFilterFor(column, anchor) : undefined}
+        aggregationFunctions={aggregationFunctions}
+        aggregation={aggregationModel[field]}
+        onAggregationChange={(fn) => {
+          const { [field]: _removed, ...rest } = aggregationModel;
+          setAggregationModel(fn ? { ...rest, [field]: fn } : rest);
+        }}
+        grouped={rowGroupingModel.includes(field)}
+        onToggleGroup={
+          disableRowGrouping || treeData || column.type === 'actions'
+            ? undefined
+            : () => setRowGroupingModel(rowGroupingModel.includes(field) ? rowGroupingModel.filter((item) => item !== field) : [...rowGroupingModel, field])
+        }
+        onHide={column.hideable === false ? undefined : () => setVisibilityModel({ ...visibilityModel, [field]: false })}
+        onManageColumns={() => setMenuPanel({ kind: 'columns', anchor: headerCellOf(anchor) })}
+      />
+    );
+  };
+
   const startResize = (event: PointerEvent, column: GridColDef<R>, startWidth: number) => {
     event.preventDefault();
     event.stopPropagation();
@@ -910,7 +1003,8 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
   const renderHeaderCell = (column: GridColDef<R>, index: number) => {
     const sortItem = sortModel.find((item) => item.field === column.field);
     const sortIndex = sortModel.findIndex((item) => item.field === column.field);
-    const sortable = !disableColumnSorting && column.sortable !== false && !SPECIAL_FIELDS.has(column.field) && column.type !== 'actions';
+    const sortable = isSortable(column);
+    const menuOpen = columnMenu?.field === column.field;
     const resizable = !disableColumnResize && column.resizable !== false && !SPECIAL_FIELDS.has(column.field);
     const reorderable =
       !disableColumnReorder && !column.disableReorder && index >= leftCount && index < rightStart && !SPECIAL_FIELDS.has(column.field);
@@ -930,14 +1024,22 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
         onDragOver={reorderable ? (event) => event.preventDefault() : undefined}
         onDrop={reorderable ? (event) => handleDrop(event, column) : undefined}
         onClick={(event) => handleSort(column, event)}
-        sx={{ ...cellSx(index, true), cursor: sortable ? 'pointer' : 'default', userSelect: 'none' }}
+        sx={{
+          ...cellSx(index, true),
+          cursor: sortable ? 'pointer' : 'default',
+          userSelect: 'none',
+          flexDirection: headerAlign === 'right' ? 'row-reverse' : 'row',
+          justifyContent: 'space-between',
+          // The menu button takes no room until it shows, so it does not squeeze the header text.
+          '&:hover .DnaDataGrid-menuButton, &:focus-within .DnaDataGrid-menuButton': menuButtonShownSx,
+        }}
       >
-        <Box sx={{ display: 'flex', flexDirection: 'column', minWidth: 0, alignItems: JUSTIFY[headerAlign] }}>
+        <Box sx={{ display: 'flex', flexDirection: 'column', minWidth: 0, flex: 1, alignItems: JUSTIFY[headerAlign] }}>
           {sortable ? (
             <TableSortLabel
               active={Boolean(direction)}
               direction={direction === 'desc' ? 'desc' : 'asc'}
-              sx={{ ...ellipsisSx, flexDirection: headerAlign === 'right' ? 'row-reverse' : 'row' }}
+              sx={{ ...ellipsisSx, maxWidth: '100%', flexDirection: headerAlign === 'right' ? 'row-reverse' : 'row' }}
             >
               {content}
               {sortModel.length > 1 && sortIndex !== -1 && (
@@ -947,7 +1049,7 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
               )}
             </TableSortLabel>
           ) : (
-            <Box component="span" sx={ellipsisSx}>
+            <Box component="span" sx={{ ...ellipsisSx, maxWidth: '100%' }}>
               {content}
             </Box>
           )}
@@ -957,6 +1059,23 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
             </Box>
           )}
         </Box>
+        {hasColumnMenu(column) && (
+          <IconButton
+            className="DnaDataGrid-menuButton"
+            size="small"
+            aria-label={`${column.headerName ?? column.field} ${localeText.columnMenuLabel}`}
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            draggable={false}
+            onClick={(event) => {
+              event.stopPropagation();
+              setColumnMenu(menuOpen ? null : { field: column.field, anchor: event.currentTarget });
+            }}
+            sx={{ flexShrink: 0, p: 0, width: 0, opacity: 0, overflow: 'hidden', '& svg': { fontSize: 18 }, ...(menuOpen && menuButtonShownSx) }}
+          >
+            <MoreVertIcon />
+          </IconButton>
+        )}
         {resizable && (
           <Box
             role="separator"
@@ -1018,11 +1137,30 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
       variant="outlined"
       sx={[
         (theme) => getBorderVariables(theme),
-        { display: 'flex', flexDirection: 'column', position: 'relative', p: 2, borderRadius: '8px', '&&': { borderColor: 'var(--DnaDataGrid-border)' } },
+        { display: 'flex', flexDirection: 'column', position: 'relative', p: 2, pb: showFooter ? 0 : 2, borderRadius: '8px', '&&': { borderColor: 'var(--DnaDataGrid-border)' } },
         ...(Array.isArray(sx) ? sx : [sx]),
       ]}
     >
       {showToolbar && <Toolbar {...toolbarProps} />}
+      {renderColumnMenu()}
+      <Popover
+        open={menuPanel !== null}
+        anchorEl={menuPanel?.anchor}
+        onClose={() => setMenuPanel(null)}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
+      >
+        {menuPanel?.kind === 'filter' && (
+          <GridFilterPanel columns={userColumns} filterModel={filterModel} onFilterModelChange={setFilterModel} localeText={localeText} />
+        )}
+        {menuPanel?.kind === 'columns' && (
+          <GridColumnsPanel
+            columns={userColumns}
+            columnVisibilityModel={effectiveVisibility}
+            onColumnVisibilityModelChange={setVisibilityModel}
+            localeText={localeText}
+          />
+        )}
+      </Popover>
       {loading && <LinearProgress aria-label={localeText.loadingLabel} sx={{ position: 'absolute', left: 0, right: 0, top: 0, zIndex: 5 }} />}
       <TableContainer
         ref={scrollerRef}
@@ -1141,6 +1279,17 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
               labelRowsPerPage={localeText.paginationRowsPerPage}
               onPageChange={(_, nextPage) => setPaginationModel({ ...paginationModel, page: nextPage })}
               onRowsPerPageChange={(event) => setPaginationModel({ page: 0, pageSize: Number(event.target.value) })}
+              // Opens the menu 8px left of the select so the options' 8px padding puts their text under the selected value.
+              slotProps={{
+                select: {
+                  MenuProps: {
+                    anchorOrigin: { vertical: 'bottom', horizontal: 'left' },
+                    transformOrigin: { vertical: 'top', horizontal: 'left' },
+                    slotProps: { paper: { sx: { ml: -1, '& .MuiMenuItem-root': { fontSize: 12, pl: 1, pr: 2 } } } },
+                  },
+                },
+              }}
+              sx={{ '& .MuiTablePagination-select, & .MuiTablePagination-selectLabel, & .MuiTablePagination-displayedRows': { fontSize: 12, lineHeight: '20px' }, '& .MuiTablePagination-select.MuiSelect-select': { lineHeight: '24px' } }}
             />
           )}
         </Box>

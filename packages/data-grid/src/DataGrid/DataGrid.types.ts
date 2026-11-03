@@ -123,6 +123,8 @@ export interface GridColDef<R extends GridValidRowModel = GridValidRowModel> {
   resizable?: boolean;
   /** Prevents the column from being dragged to a new position. */
   disableReorder?: boolean;
+  /** Hides the menu button in this column's header. */
+  disableColumnMenu?: boolean;
   editable?: boolean;
   /** Options of a `singleSelect` column. */
   valueOptions?: readonly (string | number | GridValueOption)[];
@@ -171,8 +173,8 @@ export interface GridLocaleText {
   densityComfortable: string;
   exportCsv: string;
   exportPrint: string;
-  columnsPanelShowAll: string;
-  columnsPanelHideAll: string;
+  columnsPanelShowHideAll: string;
+  columnsPanelReset: string;
   columnsPanelSearch: string;
   filterPanelAddFilter: string;
   filterPanelRemoveAll: string;
@@ -194,6 +196,16 @@ export interface GridLocaleText {
   booleanTrue: string;
   booleanFalse: string;
   paginationRowsPerPage: string;
+  columnMenuLabel: string;
+  columnMenuSortAsc: string;
+  columnMenuSortDesc: string;
+  columnMenuFilter: string;
+  columnMenuAggregation: string;
+  columnMenuAggregationNone: string;
+  columnMenuGroupBy: (columnName: string) => string;
+  columnMenuUngroupBy: (columnName: string) => string;
+  columnMenuHideColumn: string;
+  columnMenuManageColumns: string;
 }
 
 export interface GridToolbarProps<R extends GridValidRowModel = GridValidRowModel> {
@@ -293,6 +305,8 @@ export interface DataGridProps<R extends GridValidRowModel = GridValidRowModel> 
   disableColumnFilter?: boolean;
   disableColumnResize?: boolean;
   disableColumnReorder?: boolean;
+  /** Hides the menu button in each column header. */
+  disableColumnMenu?: boolean;
 
   editMode?: 'cell' | 'row';
   /** Called with the edited row before it is committed. Return the row to keep, or throw to reject. */
@@ -309,7 +323,13 @@ export interface DataGridProps<R extends GridValidRowModel = GridValidRowModel> 
   defaultGroupingExpansionDepth?: number;
   groupingColDef?: Partial<GridColDef<R>>;
   rowGroupingModel?: string[];
+  onRowGroupingModelChange?: (model: string[]) => void;
+  /** Turns off grouping by a column from the column menu. */
+  disableRowGrouping?: boolean;
   aggregationModel?: GridAggregationModel;
+  onAggregationModelChange?: (model: GridAggregationModel) => void;
+  /** Turns off choosing an aggregation from the column menu. */
+  disableAggregation?: boolean;
 
   getDetailPanelContent?: (params: { id: GridRowId; row: R }) => ReactNode;
   /** Height of an open detail panel in px. Defaults to 200. */

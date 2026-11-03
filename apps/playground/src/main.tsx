@@ -53,7 +53,7 @@ function Overview() {
   const apiRef = useGridApiRef();
   return (
     <>
-      <Box sx={{ mb: 1, display: 'flex', gap: 1 }}>
+      <Box sx={{ mb: 2, display: 'flex', gap: 1 }}>
         <Button size="small" variant="outlined" onClick={() => apiRef.current.exportDataAsCsv({ fileName: 'employees' })}>
           Export CSV via apiRef
         </Button>
@@ -70,12 +70,12 @@ function Overview() {
         initialState={{
           sorting: { sortModel: [{ field: 'salary', sort: 'desc' }] },
           pagination: { paginationModel: { page: 0, pageSize: 25 } },
+          aggregation: { model: { salary: 'avg', age: 'max' } },
         }}
         columnGroupingModel={[
           { groupId: 'person', headerName: 'Person', children: [{ field: 'name' }, { field: 'age' }] },
           { groupId: 'work', headerName: 'Work', children: [{ field: 'team' }, { field: 'role' }, { field: 'salary' }] },
         ]}
-        aggregationModel={{ salary: 'avg', age: 'max' }}
       />
     </>
   );
@@ -123,8 +123,7 @@ function RowGrouping() {
     <DataGrid
       rows={employees.slice(0, 200)}
       columns={columns}
-      rowGroupingModel={['team', 'role']}
-      aggregationModel={{ salary: 'avg', age: 'max' }}
+      initialState={{ rowGrouping: { model: ['team', 'role'] }, aggregation: { model: { salary: 'avg', age: 'max' } } }}
       defaultGroupingExpansionDepth={1}
       pagination={false}
       height={480}

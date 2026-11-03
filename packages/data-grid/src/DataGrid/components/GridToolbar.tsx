@@ -4,11 +4,15 @@ import FilterListIcon from '@mui/icons-material/FilterList';
 import SearchIcon from '@mui/icons-material/Search';
 import TableRowsIcon from '@mui/icons-material/TableRows';
 import ViewColumnIcon from '@mui/icons-material/ViewColumn';
+import ViewHeadlineIcon from '@mui/icons-material/ViewHeadline';
+import ViewStreamIcon from '@mui/icons-material/ViewStream';
 import Badge from '@mui/material/Badge';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
 import IconButton from '@mui/material/IconButton';
 import InputAdornment from '@mui/material/InputAdornment';
+import ListItemIcon from '@mui/material/ListItemIcon';
+import ListItemText from '@mui/material/ListItemText';
 import Menu from '@mui/material/Menu';
 import MenuItem from '@mui/material/MenuItem';
 import Popover from '@mui/material/Popover';
@@ -50,11 +54,13 @@ export function GridToolbar<R extends GridValidRowModel = GridValidRowModel>(pro
   const setQuickFilter = (value: string) =>
     onFilterModelChange({ ...filterModel, quickFilterValues: value.split(' ').filter((part) => part !== '') });
 
-  const densities: { value: GridDensity; label: string }[] = [
-    { value: 'compact', label: localeText.densityCompact },
-    { value: 'standard', label: localeText.densityStandard },
-    { value: 'comfortable', label: localeText.densityComfortable },
+  const densities: { value: GridDensity; label: string; Icon: typeof TableRowsIcon }[] = [
+    { value: 'compact', label: localeText.densityCompact, Icon: ViewHeadlineIcon },
+    { value: 'standard', label: localeText.densityStandard, Icon: TableRowsIcon },
+    { value: 'comfortable', label: localeText.densityComfortable, Icon: ViewStreamIcon },
   ];
+  // The button shows the current density's icon, as in MUI X.
+  const DensityIcon = densities.find((option) => option.value === density)?.Icon ?? TableRowsIcon;
 
   const buttonSx = { fontSize: 12, fontWeight: 500, '& .MuiButton-startIcon svg': { fontSize: 16 } };
 
@@ -76,7 +82,7 @@ export function GridToolbar<R extends GridValidRowModel = GridValidRowModel>(pro
       >
         {localeText.toolbarFilters}
       </Button>
-      <Button size="small" color="inherit" sx={buttonSx} startIcon={<TableRowsIcon />} onClick={open('density')}>
+      <Button size="small" color="inherit" sx={buttonSx} startIcon={<DensityIcon />}onClick={open('density')}>
         {localeText.toolbarDensity}
       </Button>
       <Button size="small" color="inherit" sx={buttonSx} startIcon={<FileDownloadIcon />} onClick={open('export')}>
@@ -154,7 +160,8 @@ export function GridToolbar<R extends GridValidRowModel = GridValidRowModel>(pro
               close();
             }}
           >
-            {option.label}
+            <ListItemIcon><option.Icon fontSize="small" /></ListItemIcon>
+            <ListItemText>{option.label}</ListItemText>
           </MenuItem>
         ))}
       </Menu>

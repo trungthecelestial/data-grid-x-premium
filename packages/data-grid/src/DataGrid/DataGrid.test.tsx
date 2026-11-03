@@ -373,4 +373,88 @@ describe('DataGrid', () => {
     expect(screen.getByText('1–10 of 40')).toBeTruthy();
     expect(bodyNames()).toEqual(['Ada', 'Alan']);
   });
+  it('sorts from the column menu', async () => {
+    const onSortModelChange = vi.fn();
+    render(<DataGrid rows={people} columns={columns} onSortModelChange={onSortModelChange} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Age Menu', hidden: true }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Sort by DESC' }));
+
+    expect(onSortModelChange).toHaveBeenLastCalledWith([{ field: 'age', sort: 'desc' }]);
+    expect(bodyNames()).toEqual(['Alan', 'Ada', 'Grace', 'Linus']);
+  });
+
+  it('opens the filter panel for the column from the column menu', async () => {
+    render(<DataGrid rows={people} columns={columns} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Name Menu', hidden: true }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Filter' }));
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Value' }), { target: { value: 'gra' } });
+
+    expect(bodyNames()).toEqual(['Grace']);
+  });
+
+  it('hides a column from the column menu', async () => {
+    render(<DataGrid rows={people} columns={columns} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Team Menu', hidden: true }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Hide column' }));
+
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Team Menu', hidden: true })).toBeNull());
+  });
+
+  it('hides columns in the manage columns panel and resets them', async () => {
+    render(<DataGrid rows={people} columns={columns} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Team Menu', hidden: true }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Manage columns' }));
+    const reset = await screen.findByRole('button', { name: 'Reset' });
+    expect((reset as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Show/Hide All' }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Team Menu', hidden: true })).toBeNull());
+
+    fireEvent.click(reset);
+    expect(await screen.findByRole('button', { name: 'Team Menu', hidden: true })).toBeTruthy();
+    expect((reset as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('groups by a column from the column menu', async () => {
+    const onRowGroupingModelChange = vi.fn();
+    render(<DataGrid rows={people} columns={columns} onRowGroupingModelChange={onRowGroupingModelChange} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Team Menu', hidden: true }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Group by Team' }));
+
+    expect(onRowGroupingModelChange).toHaveBeenLastCalledWith(['team']);
+    expect(await screen.findByText('red (2)')).toBeTruthy();
+  });
+
+  it('stops grouping from the grouping column menu', async () => {
+    render(<DataGrid rows={people} columns={columns} initialState={{ rowGrouping: { model: ['team'] } }} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Group Menu', hidden: true }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Stop grouping by Team' }));
+
+    await waitFor(() => expect(screen.queryByText('red (2)')).toBeNull());
+    expect(bodyNames()).toEqual(['Ada', 'Alan', 'Grace', 'Linus']);
+  });
+
+  it('sets an aggregation from the column menu', async () => {
+    const onAggregationModelChange = vi.fn();
+    render(<DataGrid rows={people} columns={columns} onAggregationModelChange={onAggregationModelChange} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Age Menu', hidden: true }));
+    fireEvent.mouseDown(await screen.findByRole('combobox', { name: 'Aggregation' }));
+    fireEvent.click(await screen.findByRole('option', { name: 'Sum' }));
+
+    expect(onAggregationModelChange).toHaveBeenLastCalledWith({ age: 'sum' });
+    expect(await screen.findByText('132')).toBeTruthy();
+  });
+
+  it('leaves the column menu out with disableColumnMenu', () => {
+    render(<DataGrid rows={people} columns={columns} disableColumnMenu />);
+
+    expect(screen.queryByRole('button', { name: 'Age Menu', hidden: true })).toBeNull();
+  });
 });
