@@ -6,5 +6,5 @@ it('renders a header and a row per item', () => {
   render(<DataGrid rows={[{ id: 1, name: 'Ada' }]} columns={[{ field: 'name', headerName: 'Name' }]} />);
 
   expect(screen.getByRole('columnheader', { name: 'Name' })).toBeTruthy();
-  expect(screen.getByRole('gridcell', { name: 'Ada' })).toBeTruthy();
+  expect(screen.getByRole('cell', { name: 'Ada' })).toBeTruthy();
 });

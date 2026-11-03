@@ -12,7 +12,7 @@ A React data grid inspired by the features, structure and usage of [MUI X Data G
 
 ## Getting started
 
-Requires Node 20+ and pnpm (`corepack enable`).
+Requires Node 22.23.4+ and pnpm 10 (`npm i -g pnpm`, or `corepack enable` on Node 22-24).
 
 ```bash
 pnpm install
