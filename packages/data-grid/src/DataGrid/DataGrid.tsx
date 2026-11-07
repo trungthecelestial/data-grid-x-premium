@@ -25,11 +25,14 @@ import {
   useMemo,
   useRef,
   useState,
+  type ComponentProps,
+  type ComponentType,
   type DragEvent,
   type KeyboardEvent,
   type MouseEvent,
   type PointerEvent,
   type ReactNode,
+  type UIEvent,
 } from 'react';
 import { GridCellEditor } from './components/GridCellEditor';
 import { GridColumnMenu, getAvailableAggregationFunctions } from './components/GridColumnMenu';
@@ -41,14 +44,28 @@ import type {
   GridAggregationModel,
   GridApi,
   GridApiRef,
+  GridAutosizeOptions,
+  GridCellParams,
   GridColDef,
+  GridColumnsPanelSlotProps,
+  GridCsvExportOptions,
+  GridEditStopReason,
+  GridEventMap,
+  GridEventName,
   GridFilterModel,
+  GridFilterPanelSlotProps,
+  GridInitialState,
   GridPaginationModel,
+  GridPinnedColumns,
+  GridPrintExportOptions,
   GridRowId,
+  GridRowUpdate,
   GridSortDirection,
+  GridToolbarProps,
   GridValidRowModel,
 } from './DataGrid.types';
 import { formatAggregate } from './features/aggregation';
+import { computeAutosizeWidths } from './features/autosize';
 import {
   buildGroupHeaderRows,
   getCellValue,
@@ -87,6 +104,8 @@ const EMPTY_ARRAY: readonly never[] = [];
 const EMPTY_STRINGS: readonly string[] = [];
 const EMPTY_OBJECT: Readonly<Record<string, never>> = {};
 const EMPTY_MAP = new Map<never, never>();
+const EMPTY_SET: ReadonlySet<never> = new Set<never>();
+const DEFAULT_FONT = '14px Roboto, Helvetica, Arial, sans-serif';
 const DEFAULT_FILTER_MODEL: GridFilterModel = { items: [] };
 
 // Same derivation MUI X uses for its grid borders, so the lines match the divider colour of any theme.
@@ -112,6 +131,16 @@ const menuButtonShownSx = { width: 24, p: 0.25, opacity: 1, mx: 0.25 } as const;
 type Entry<R extends GridValidRowModel> =
   | { kind: 'row'; node: GridTreeNode<R> }
   | { kind: 'detail'; node: GridTreeNode<R>; height: number };
+
+/** Row changes made at runtime (cell edits and `apiRef.updateRows`). They apply on top of `rows` until `rows` changes. */
+interface RowUpdates<R extends GridValidRowModel> {
+  source: readonly R[];
+  map: ReadonlyMap<GridRowId, R>;
+  added: readonly R[];
+  deleted: ReadonlySet<GridRowId>;
+}
+
+type EventListener = (...args: any[]) => void;
 
 interface EditState {
   id: GridRowId;
@@ -170,6 +199,25 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     getDetailPanelContent,
     getDetailPanelHeight,
     pinnedRows,
+    getRowClassName,
+    getCellClassName,
+    getRowHeight,
+    isCellEditable,
+    slotProps,
+    hideFooterPagination = false,
+    hideFooterSelectedRowCount = false,
+    disableColumnSelector = false,
+    disableDensitySelector = false,
+    keepNonExistentRowsSelected = false,
+    checkboxSelectionVisibleOnly = false,
+    showCellVerticalBorder = false,
+    showColumnVerticalBorder = false,
+    ignoreValueFormatterDuringExport = false,
+    disableClipboardCopy = false,
+    disableAutosize = false,
+    scrollEndThreshold = 80,
+    csvOptions,
+    printOptions,
   } = props;
 
   const localeText = useMemo(() => ({ ...DEFAULT_LOCALE_TEXT, ...props.localeText }), [props.localeText]);
@@ -200,7 +248,7 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     props.onColumnVisibilityModelChange,
   );
   const [density, setDensity] = useGridState(props.density, initialState?.density ?? 'standard', props.onDensityChange);
-  const [pinned] = useGridState(props.pinnedColumns, initialState?.pinnedColumns ?? EMPTY_OBJECT, props.onPinnedColumnsChange);
+  const [pinned, setPinned] = useGridState(props.pinnedColumns, initialState?.pinnedColumns ?? EMPTY_OBJECT, props.onPinnedColumnsChange);
   const [detailIds, setDetailIds] = useGridState<readonly GridRowId[]>(
     props.detailPanelExpandedRowIds,
     EMPTY_ARRAY,
@@ -227,9 +275,11 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     Object.fromEntries(Object.entries(initialState?.columns?.dimensions ?? {}).map(([field, { width }]) => [field, width])),
   );
   const [expansion, setExpansion] = useState<ReadonlyMap<GridRowId, boolean>>(EMPTY_MAP);
-  const [rowUpdates, setRowUpdates] = useState<{ source: readonly R[]; map: ReadonlyMap<GridRowId, R> }>({
+  const [rowUpdates, setRowUpdates] = useState<RowUpdates<R>>({
     source: rows,
     map: EMPTY_MAP,
+    added: EMPTY_ARRAY,
+    deleted: EMPTY_SET,
   });
   const [editing, setEditing] = useState<EditState | null>(null);
   const [focusPosition, setFocusPosition] = useState<{ row: number; col: number } | null>(null);
@@ -242,6 +292,28 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
   const shouldFocusRef = useRef(false);
   const lastSelectedRef = useRef<GridRowId | null>(null);
   const dragFieldRef = useRef<string | null>(null);
+  const listenersRef = useRef(new Map<GridEventName, Set<EventListener>>());
+  const eventPropsRef = useRef<Partial<Record<GridEventName, EventListener | undefined>>>({});
+  eventPropsRef.current = {
+    rowClick: props.onRowClick,
+    rowDoubleClick: props.onRowDoubleClick,
+    cellClick: props.onCellClick,
+    cellDoubleClick: props.onCellDoubleClick,
+    cellKeyDown: props.onCellKeyDown,
+    columnHeaderClick: props.onColumnHeaderClick,
+    cellEditStart: props.onCellEditStart,
+    cellEditStop: props.onCellEditStop,
+    rowEditStart: props.onRowEditStart,
+    rowEditStop: props.onRowEditStop,
+    rowsScrollEnd: props.onRowsScrollEnd,
+  };
+  const atScrollEndRef = useRef(false);
+
+  // Calls the matching `on*` prop first, then every `apiRef.subscribeEvent` listener.
+  const emit = useCallback(<E extends GridEventName>(name: E, ...args: GridEventMap[E]) => {
+    eventPropsRef.current[name]?.(...args);
+    listenersRef.current.get(name)?.forEach((listener) => listener(...args));
+  }, []);
 
   const { width: containerWidth, height: containerHeight } = useElementSize(scrollerRef);
 
@@ -250,8 +322,18 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
   const headerHeight = props.columnHeaderHeight ?? heights.header;
 
   const mergedRows = useMemo(() => {
-    const updates = rowUpdates.source === rows ? rowUpdates.map : EMPTY_MAP;
-    return updates.size === 0 ? rows : rows.map((row) => updates.get(getRowId(row)) ?? row);
+    if (rowUpdates.source !== rows) {
+      return rows;
+    }
+    const { map, added, deleted } = rowUpdates;
+    if (map.size === 0 && added.length === 0 && deleted.size === 0) {
+      return rows;
+    }
+    const all = added.length > 0 ? [...rows, ...added] : rows;
+    return all.flatMap((row) => {
+      const id = getRowId(row);
+      return deleted.has(id) ? [] : [map.get(id) ?? row];
+    });
   }, [rows, rowUpdates, getRowId]);
 
   const rowsById = useMemo(() => new Map(mergedRows.map((row) => [getRowId(row), row])), [mergedRows, getRowId]);
@@ -308,16 +390,25 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
       rowSelection && row !== undefined && (isRowSelectable ? isRowSelectable({ id, row }) : true),
     [rowSelection, isRowSelectable],
   );
-  const selectableIds = useMemo(
-    () =>
-      rowSelection
-        ? filteredRows.flatMap((row) => {
-            const id = getRowId(row);
-            return isSelectable(id, row) ? [id] : [];
-          })
-        : [],
-    [rowSelection, filteredRows, getRowId, isSelectable],
-  );
+  const selectableIds = useMemo(() => {
+    if (!rowSelection) {
+      return [];
+    }
+    const candidates = checkboxSelectionVisibleOnly
+      ? pageNodes.flatMap((node) => (node.row ? [node.row] : []))
+      : filteredRows;
+    return candidates.flatMap((row) => {
+      const id = getRowId(row);
+      return isSelectable(id, row) ? [id] : [];
+    });
+  }, [rowSelection, checkboxSelectionVisibleOnly, pageNodes, filteredRows, getRowId, isSelectable]);
+
+  // Selected ids whose row left `rows` are dropped, unless the consumer keeps them on purpose (for example across server pages).
+  useEffect(() => {
+    if (!keepNonExistentRowsSelected && selection.some((id) => !rowsById.has(id))) {
+      setSelection(selection.filter((id) => rowsById.has(id)));
+    }
+  }, [rowsById, selection, keepNonExistentRowsSelected, setSelection]);
 
   const toggleDetail = useCallback(
     (id: GridRowId) => setDetailIds((previous) => (previous.includes(id) ? previous.filter((item) => item !== id) : [...previous, id])),
@@ -523,6 +614,12 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     [columnGroupingModel, columns],
   );
 
+  const rowHeightFor = useCallback(
+    (node: GridTreeNode<R>) =>
+      (node.row && getRowHeight ? getRowHeight({ id: node.id, row: node.row }) : null) ?? rowHeight,
+    [getRowHeight, rowHeight],
+  );
+
   const entries = useMemo(() => {
     const result: Entry<R>[] = [];
     for (const node of pageNodes) {
@@ -536,8 +633,8 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
   }, [pageNodes, getDetailPanelContent, getDetailPanelHeight, detailIds]);
 
   const offsets = useMemo(
-    () => getOffsets(entries.map((entry) => (entry.kind === 'detail' ? entry.height : rowHeight))),
-    [entries, rowHeight],
+    () => getOffsets(entries.map((entry) => (entry.kind === 'detail' ? entry.height : rowHeightFor(entry.node)))),
+    [entries, rowHeightFor],
   );
 
   const virtualize = !disableVirtualization && !autoHeight;
@@ -557,32 +654,87 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
 
   const exportColumns = useMemo(() => visibleUserColumns.filter((column) => column.type !== 'actions'), [visibleUserColumns]);
 
+  const apiObjectRef = useRef<GridApi | null>(null);
+
+  const resolveExport = useCallback(
+    (options?: { fields?: string[]; allColumns?: boolean; getRowsToExport?: GridCsvExportOptions['getRowsToExport'] }) => {
+      const exportedColumns = options?.fields
+        ? options.fields.flatMap((field) => userColumnMap.get(field) ?? [])
+        : options?.allColumns
+          ? orderedFields.flatMap((field) => userColumnMap.get(field) ?? []).filter((column) => column.type !== 'actions')
+          : exportColumns;
+      const exportedRows = options?.getRowsToExport
+        ? options.getRowsToExport({ apiRef: apiObjectRef.current as GridApi }).flatMap((id) => rowsById.get(id) ?? [])
+        : filteredRows;
+      return { exportedColumns, exportedRows };
+    },
+    [userColumnMap, orderedFields, exportColumns, rowsById, filteredRows],
+  );
+
   const getDataAsCsv = useCallback(
-    (options?: { delimiter?: string }) => buildCsv(filteredRows, exportColumns, options),
-    [filteredRows, exportColumns],
+    (options?: Omit<GridCsvExportOptions, 'fileName'>) => {
+      const merged = { ...csvOptions, ...options };
+      const { exportedColumns, exportedRows } = resolveExport(merged);
+      return buildCsv(exportedRows, exportedColumns, {
+        delimiter: merged.delimiter,
+        includeHeaders: merged.includeHeaders,
+        utf8WithBom: merged.utf8WithBom,
+        raw: ignoreValueFormatterDuringExport,
+      });
+    },
+    [csvOptions, resolveExport, ignoreValueFormatterDuringExport],
   );
   const exportDataAsCsv = useCallback(
-    (options?: { fileName?: string; delimiter?: string }) =>
-      downloadFile(`${options?.fileName ?? 'data'}.csv`, getDataAsCsv(options), 'text/csv;charset=utf-8'),
-    [getDataAsCsv],
+    (options?: GridCsvExportOptions) =>
+      downloadFile(
+        `${options?.fileName ?? csvOptions?.fileName ?? 'data'}.csv`,
+        getDataAsCsv(options),
+        'text/csv;charset=utf-8',
+      ),
+    [getDataAsCsv, csvOptions],
   );
-  const print = useCallback(() => printHtml(buildPrintHtml(filteredRows, exportColumns)), [filteredRows, exportColumns]);
+  const print = useCallback(
+    (options?: GridPrintExportOptions) => {
+      const merged = { ...printOptions, ...options };
+      const { exportedColumns, exportedRows } = resolveExport(merged);
+      printHtml(buildPrintHtml(exportedRows, exportedColumns, merged.fileName, merged.pageStyle, ignoreValueFormatterDuringExport));
+    },
+    [printOptions, resolveExport, ignoreValueFormatterDuringExport],
+  );
+
+  const getCellParams = useCallback(
+    (id: GridRowId, row: R, column: GridColDef<R>): GridCellParams<R> => {
+      const value = getCellValue(row, column);
+      return { id, row, field: column.field, value, formattedValue: getFormattedValue(row, column, value), colDef: column };
+    },
+    [],
+  );
+
+  const canEditCell = useCallback(
+    (id: GridRowId, row: R | undefined, column: GridColDef<R>) =>
+      Boolean(column.editable) &&
+      row !== undefined &&
+      column.type !== 'actions' &&
+      !SPECIAL_FIELDS.has(column.field) &&
+      (isCellEditable ? isCellEditable(getCellParams(id, row, column)) : true),
+    [isCellEditable, getCellParams],
+  );
 
   const isEditable = useCallback(
-    (column: GridColDef<R>, node: GridTreeNode<R>) =>
-      Boolean(column.editable) && Boolean(node.row) && column.type !== 'actions' && !SPECIAL_FIELDS.has(column.field),
-    [],
+    (column: GridColDef<R>, node: GridTreeNode<R>) => canEditCell(node.id, node.row, column),
+    [canEditCell],
   );
 
   const startCellEdit = useCallback(
     (id: GridRowId, field: string) => {
       const row = rowsById.get(id);
       const column = userColumnMap.get(field);
-      if (row && column?.editable) {
+      if (row && column && canEditCell(id, row, column)) {
         setEditing({ id, field, values: { [field]: getCellValue(row, column) } });
+        emit('cellEditStart', { id, field });
       }
     },
-    [rowsById, userColumnMap],
+    [rowsById, userColumnMap, canEditCell, emit],
   );
 
   const startRowEdit = useCallback(
@@ -593,27 +745,37 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
       }
       const values: Record<string, unknown> = {};
       for (const column of visibleUserColumns) {
-        if (column.editable && column.type !== 'actions') {
+        if (canEditCell(id, row, column)) {
           values[column.field] = getCellValue(row, column);
         }
       }
       setEditing({ id, values });
+      emit('rowEditStart', { id });
     },
-    [rowsById, visibleUserColumns],
+    [rowsById, visibleUserColumns, canEditCell, emit],
   );
 
-  const stopEdit = useCallback(async (options?: { ignoreModifications?: boolean }) => {
+  const stopEdit = useCallback(async (options?: { ignoreModifications?: boolean; reason?: GridEditStopReason }) => {
     const edit = editingRef.current;
     if (!edit || committingRef.current) {
       return;
     }
-    if (options?.ignoreModifications) {
+    const reason = options?.reason ?? (options?.ignoreModifications ? 'escapeKeyDown' : 'api');
+    const finish = () => {
       setEditing(null);
+      if (edit.field !== undefined) {
+        emit('cellEditStop', { id: edit.id, field: edit.field, reason });
+      } else {
+        emit('rowEditStop', { id: edit.id, reason });
+      }
+    };
+    if (options?.ignoreModifications) {
+      finish();
       return;
     }
     const oldRow = rowsById.get(edit.id);
     if (!oldRow) {
-      setEditing(null);
+      finish();
       return;
     }
     let newRow = oldRow;
@@ -626,24 +788,114 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     }
     const changed = Object.keys({ ...oldRow, ...newRow }).some((key) => oldRow[key] !== newRow[key]);
     if (!changed) {
-      setEditing(null);
+      finish();
       return;
     }
     committingRef.current = true;
     try {
       const result = processRowUpdate ? await processRowUpdate(newRow, oldRow) : newRow;
       setRowUpdates((previous) => {
-        const map = new Map(previous.source === rows ? previous.map : []);
+        const base = previous.source === rows ? previous : { source: rows, map: EMPTY_MAP, added: EMPTY_ARRAY, deleted: EMPTY_SET };
+        const map = new Map(base.map);
         map.set(edit.id, result);
-        return { source: rows, map };
+        return { ...base, map };
       });
-      setEditing(null);
+      finish();
     } catch (error) {
       onProcessRowUpdateError?.(error);
     } finally {
       committingRef.current = false;
     }
-  }, [rowsById, userColumnMap, processRowUpdate, onProcessRowUpdateError, rows]);
+  }, [rowsById, userColumnMap, processRowUpdate, onProcessRowUpdateError, rows, emit]);
+
+  const applyColumnOrder = (next: string[]) => {
+    setColumnOrder(next);
+    props.onColumnOrderChange?.(next);
+  };
+
+  const applyColumnWidth = (field: string, width: number) => {
+    setWidthOverrides((previous) => ({ ...previous, [field]: width }));
+    props.onColumnWidthChange?.({ field, width });
+  };
+
+  const autosizeColumns = (options?: GridAutosizeOptions) => {
+    const targets = (
+      options?.columns ? visibleUserColumns.filter((column) => options.columns?.includes(column.field)) : visibleUserColumns
+    ).filter((column) => column.type !== 'actions');
+    const scroller = scrollerRef.current;
+    const sample = scroller?.querySelector('[role="gridcell"]') ?? scroller;
+    const style = sample ? getComputedStyle(sample) : null;
+    const font = style?.fontSize && style.fontFamily ? `${style.fontSize} ${style.fontFamily}` : DEFAULT_FONT;
+    const result = computeAutosizeWidths({
+      columns: targets,
+      rows: filteredRows,
+      font,
+      includeHeaders: options?.includeHeaders ?? true,
+      extraWidth: options?.extraWidth ?? 0,
+      maxRows: options?.maxRows ?? 1000,
+    });
+    setWidthOverrides((previous) => ({ ...previous, ...result }));
+    for (const [field, width] of Object.entries(result)) {
+      props.onColumnWidthChange?.({ field, width });
+    }
+    props.onColumnAutosize?.(result);
+  };
+
+  const pageRowIds = rowEntryIndexes.map((index) => (entries[index] as Entry<R>).node.id);
+
+  const focusCell = (row: number, col: number) => {
+    shouldFocusRef.current = true;
+    setFocusPosition({ row: Math.max(0, Math.min(rowEntryIndexes.length - 1, row)), col: Math.max(0, Math.min(columns.length - 1, col)) });
+  };
+
+  const pin = (field: string, side: 'left' | 'right' | null) => {
+    const left = (pinned.left ?? []).filter((item) => item !== field);
+    const right = (pinned.right ?? []).filter((item) => item !== field);
+    if (side === 'left') {
+      left.push(field);
+    } else if (side === 'right') {
+      right.push(field);
+    }
+    setPinned({ left, right });
+  };
+
+  const updateRows = (updates: GridRowUpdate[]) => {
+    setRowUpdates((previous) => {
+      const base: RowUpdates<R> =
+        previous.source === rows ? previous : { source: rows, map: EMPTY_MAP, added: EMPTY_ARRAY, deleted: EMPTY_SET };
+      const map = new Map(base.map);
+      let added = [...base.added];
+      const deleted = new Set(base.deleted);
+      const known = new Map<GridRowId, R>([...rows, ...added].map((row) => [getRowId(row), row]));
+      for (const { _action, ...fields } of updates) {
+        const id = getRowId(fields as unknown as R);
+        if (_action === 'delete') {
+          deleted.add(id);
+          map.delete(id);
+          added = added.filter((row) => getRowId(row) !== id);
+          continue;
+        }
+        deleted.delete(id);
+        const current = map.get(id) ?? known.get(id);
+        if (current) {
+          map.set(id, { ...current, ...fields } as R);
+        } else {
+          const row = fields as unknown as R;
+          added.push(row);
+          known.set(id, row);
+        }
+      }
+      return { source: rows, map, added, deleted };
+    });
+  };
+
+  const selectRows = (ids: readonly GridRowId[], isSelected = true, resetSelection = false) =>
+    setSelection((previous) => {
+      if (!isSelected) {
+        return previous.filter((id) => !ids.includes(id));
+      }
+      return resetSelection ? [...ids] : [...previous.filter((id) => !ids.includes(id)), ...ids];
+    });
 
   const api: GridApi = {
     exportDataAsCsv,
@@ -655,7 +907,145 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     setRowSelectionModel: setSelection,
     setColumnVisibility: (field, visible) => setVisibilityModel({ ...visibilityModel, [field]: visible }),
     getRowModels: () => rowsById,
+
+    getRow: (id) => rowsById.get(id) ?? null,
+    getRowId: (row) => getRowId(row as R),
+    getAllRowIds: () => filteredRows.map(getRowId),
+    getRowsCount: () => mergedRows.length,
+    getRowIndexRelativeToVisibleRows: (id) => filteredRows.findIndex((row) => getRowId(row) === id),
+    updateRows,
+    getCellValue: (id, field) => {
+      const row = rowsById.get(id);
+      const column = userColumnMap.get(field);
+      return row && column ? getCellValue(row, column) : undefined;
+    },
+
+    getSortModel: () => sortModel,
+    setSortModel,
+    getFilterModel: () => filterModel,
+    setFilterModel,
+    setQuickFilterValues: (values) => setFilterModel({ ...filterModel, quickFilterValues: values }),
+    getPaginationModel: () => paginationModel,
+    setPaginationModel,
+    setPage: (nextPage) => setPaginationModel({ ...paginationModel, page: nextPage }),
+    setPageSize: (pageSize) => setPaginationModel({ page: 0, pageSize }),
+    getDensity: () => density,
+    setDensity,
+
+    selectRow: (id, isSelected = true, resetSelection = false) => selectRows([id], isSelected, resetSelection),
+    selectRows,
+    isRowSelected: (id) => selectedSet.has(id),
+    getSelectedRows: () =>
+      new Map(selection.flatMap((id) => {
+        const row = rowsById.get(id);
+        return row ? [[id, row] as const] : [];
+      })),
+
+    getAllColumns: () => orderedFields.flatMap((field) => userColumnMap.get(field) ?? []),
+    getVisibleColumns: () => columns,
+    getColumn: (field) => userColumnMap.get(field),
+    getColumnIndex: (field, useVisibleColumns = true) =>
+      useVisibleColumns ? columns.findIndex((column) => column.field === field) : orderedFields.indexOf(field),
+    setColumnWidth: applyColumnWidth,
+    setColumnIndex: (field, targetIndex) => {
+      if (!orderedFields.includes(field)) {
+        return;
+      }
+      const next = orderedFields.filter((item) => item !== field);
+      next.splice(Math.max(0, Math.min(next.length, targetIndex)), 0, field);
+      applyColumnOrder(next);
+    },
+    autosizeColumns,
+    getPinnedColumns: () => pinned,
+    setPinnedColumns: setPinned,
+    pinColumn: (field, side) => pin(field, side),
+    unpinColumn: (field) => pin(field, null),
+
+    setAggregationModel,
+    setRowGroupingModel: (model) => setRowGroupingModel(model),
+    toggleDetailPanel: toggleDetail,
+    getExpandedDetailPanels: () => [...detailIds],
+    setRowChildrenExpansion: (id, isExpandedValue) => setExpansion((previous) => new Map(previous).set(id, isExpandedValue)),
+
+    scroll: ({ left, top }) => {
+      const scroller = scrollerRef.current;
+      if (!scroller) {
+        return;
+      }
+      if (left !== undefined) {
+        scroller.scrollLeft = left;
+      }
+      if (top !== undefined) {
+        scroller.scrollTop = top;
+        setScrollTop(top);
+      }
+    },
+    getScrollPosition: () => ({ top: scrollerRef.current?.scrollTop ?? 0, left: scrollerRef.current?.scrollLeft ?? 0 }),
+    scrollToIndexes: ({ rowIndex, colIndex }) => {
+      const scroller = scrollerRef.current;
+      if (!scroller) {
+        return;
+      }
+      if (rowIndex !== undefined) {
+        const entryIndex = rowEntryIndexes[rowIndex];
+        if (entryIndex !== undefined) {
+          const top = offsets[entryIndex] ?? 0;
+          scroller.scrollTop = top;
+          setScrollTop(top);
+        }
+      }
+      if (colIndex !== undefined) {
+        scroller.scrollLeft = widths.slice(0, colIndex).reduce((total, width) => total + width, 0);
+      }
+    },
+    setCellFocus: (id, field) => {
+      const row = pageRowIds.indexOf(id);
+      const col = columns.findIndex((column) => column.field === field);
+      if (row !== -1 && col !== -1) {
+        focusCell(row, col);
+      }
+    },
+
+    exportState: () => ({
+      sorting: { sortModel },
+      filter: { filterModel },
+      pagination: { paginationModel },
+      columns: {
+        columnVisibilityModel: visibilityModel,
+        orderedFields,
+        dimensions: Object.fromEntries(Object.entries(widthOverrides).map(([field, width]) => [field, { width }])),
+      },
+      pinnedColumns: pinned,
+      density,
+      rowSelection: selection,
+      aggregation: { model: aggregationModel },
+      rowGrouping: { model: [...rowGroupingModel] },
+    }),
+    restoreState: (state: GridInitialState) => {
+      if (state.sorting?.sortModel) setSortModel(state.sorting.sortModel);
+      if (state.filter?.filterModel) setFilterModel(state.filter.filterModel);
+      if (state.pagination?.paginationModel) setPaginationModel(state.pagination.paginationModel);
+      if (state.columns?.columnVisibilityModel) setVisibilityModel(state.columns.columnVisibilityModel);
+      if (state.columns?.orderedFields) applyColumnOrder([...state.columns.orderedFields]);
+      if (state.columns?.dimensions) {
+        setWidthOverrides(Object.fromEntries(Object.entries(state.columns.dimensions).map(([field, { width }]) => [field, width])));
+      }
+      if (state.pinnedColumns) setPinned(state.pinnedColumns as GridPinnedColumns);
+      if (state.density) setDensity(state.density);
+      if (state.rowSelection) setSelection(state.rowSelection);
+      if (state.aggregation?.model) setAggregationModel(state.aggregation.model);
+      if (state.rowGrouping?.model) setRowGroupingModel([...state.rowGrouping.model]);
+    },
+    subscribeEvent: (event, handler) => {
+      const listeners = listenersRef.current.get(event) ?? new Set<EventListener>();
+      listeners.add(handler as EventListener);
+      listenersRef.current.set(event, listeners);
+      return () => {
+        listeners.delete(handler as EventListener);
+      };
+    },
   };
+  apiObjectRef.current = api;
   useEffect(() => {
     if (apiRef) {
       apiRef.current = api;
@@ -692,11 +1082,14 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     setMenuPanel({ kind: 'filter', anchor: headerCellOf(anchor) });
   };
 
+  const ColumnMenu: ComponentType<ComponentProps<typeof GridColumnMenu<any>>> = slots?.columnMenu ?? GridColumnMenu;
+
   const renderColumnMenu = () => {
     if (columnMenu?.field === ROW_GROUP_FIELD) {
       const groupColumn = columns.find((candidate) => candidate.field === ROW_GROUP_FIELD);
       return groupColumn ? (
-        <GridColumnMenu
+        <ColumnMenu
+          {...slotProps?.columnMenu}
           column={groupColumn}
           anchorEl={columnMenu.anchor}
           onClose={() => setColumnMenu(null)}
@@ -714,7 +1107,8 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     const { field, anchor } = columnMenu;
     const aggregationFunctions = disableAggregation ? [] : getAvailableAggregationFunctions(column);
     return (
-      <GridColumnMenu
+      <ColumnMenu
+          {...slotProps?.columnMenu}
         column={column}
         anchorEl={anchor}
         onClose={() => setColumnMenu(null)}
@@ -772,7 +1166,30 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     props.onColumnOrderChange?.(next);
   };
 
+  const handleScroll = (event: UIEvent<HTMLDivElement>) => {
+    const element = event.currentTarget;
+    if (virtualize) {
+      setScrollTop(element.scrollTop);
+    }
+    const atEnd = element.scrollHeight > 0 && element.scrollTop + element.clientHeight >= element.scrollHeight - scrollEndThreshold;
+    if (atEnd && !atScrollEndRef.current) {
+      emit('rowsScrollEnd', {
+        visibleRowsCount: rowEntryIndexes.length,
+        viewportPageSize: Math.max(1, Math.floor(viewportHeight / rowHeight)),
+      });
+    }
+    atScrollEndRef.current = atEnd;
+  };
+
+  // New rows arrived (or the rows changed), so reaching the bottom counts as a fresh arrival.
+  useEffect(() => {
+    atScrollEndRef.current = false;
+  }, [entries.length]);
+
   const handleRowClick = (event: MouseEvent, node: GridTreeNode<R>) => {
+    if (node.row) {
+      emit('rowClick', { id: node.id, row: node.row }, event);
+    }
     if (!rowSelection || disableRowSelectionOnClick || !isSelectable(node.id, node.row) || editing) {
       return;
     }
@@ -794,11 +1211,6 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     }
   };
 
-  const focusCell = (row: number, col: number) => {
-    shouldFocusRef.current = true;
-    setFocusPosition({ row: Math.max(0, Math.min(rowEntryIndexes.length - 1, row)), col: Math.max(0, Math.min(columns.length - 1, col)) });
-  };
-
   const handleKeyDown = (event: KeyboardEvent) => {
     const target = event.target as HTMLElement;
     if (['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) || target.getAttribute('role') === 'combobox') {
@@ -812,6 +1224,10 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     const col = Number(cell.dataset.colindex);
     const entry = entries[rowEntryIndexes[row] ?? -1];
     const column = columns[col];
+
+    if (entry?.node.row && column && !SPECIAL_FIELDS.has(column.field)) {
+      emit('cellKeyDown', getCellParams(entry.node.id, entry.node.row, column), event);
+    }
 
     switch (event.key) {
       case 'ArrowDown':
@@ -843,6 +1259,28 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
           break;
         }
         return;
+      case 'c':
+      case 'C': {
+        if (disableClipboardCopy || !(event.ctrlKey || event.metaKey) || window.getSelection()?.toString()) {
+          return;
+        }
+        let text: string | null = null;
+        if (selection.length > 0) {
+          text = buildCsv(
+            filteredRows.filter((row) => selectedSet.has(getRowId(row))),
+            exportColumns,
+            { delimiter: '\t', includeHeaders: false, raw: ignoreValueFormatterDuringExport },
+          );
+        } else if (entry?.node.row && column && !SPECIAL_FIELDS.has(column.field)) {
+          text = getFormattedValue(entry.node.row, column);
+        }
+        if (text === null) {
+          return;
+        }
+        void navigator.clipboard?.writeText(text).catch(() => undefined);
+        props.onClipboardCopy?.(text);
+        break;
+      }
       case ' ':
         if (entry && rowSelection && isSelectable(entry.node.id, entry.node.row)) {
           toggleSelection(entry.node.id, !selectedSet.has(entry.node.id));
@@ -891,6 +1329,7 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
       right: pin === 'right' ? rightOffsets[index] : undefined,
       zIndex: pin ? (header ? 4 : 2) : undefined,
       bgcolor: pin ? 'background.paper' : undefined,
+      borderRight: (header ? showColumnVerticalBorder : showCellVerticalBorder) ? '1px solid var(--DnaDataGrid-border)' : undefined,
       ...ellipsisSx,
     } as const;
   };
@@ -930,7 +1369,7 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     const value = edit.values[column.field];
     const onChange = (next: unknown) =>
       setEditing((previous) => (previous ? { ...previous, values: { ...previous.values, [column.field]: next } } : previous));
-    const onCommit = () => void stopEdit();
+    const onCommit = (reason?: GridEditStopReason) => void stopEdit({ reason: reason ?? 'enterKeyDown' });
     const onCancel = () => void stopEdit({ ignoreModifications: true });
     if (column.renderEditCell) {
       return column.renderEditCell({ id: node.id, field: column.field, value, row, colDef: column, onChange, onCommit, onCancel });
@@ -960,11 +1399,18 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
         selected={selected}
         aria-rowindex={ariaIndex}
         aria-selected={rowSelection ? selected : undefined}
+        className={node.row && getRowClassName ? getRowClassName({ id: node.id, row: node.row, indexRelativeToCurrentPage: rowIndex ?? -1 }) : undefined}
         onClick={(event) => handleRowClick(event, node)}
         onDoubleClick={(event) => {
           const cell = (event.target as HTMLElement).closest<HTMLElement>('[data-field]');
           const field = cell?.dataset.field;
           const column = field ? userColumnMap.get(field) : undefined;
+          if (node.row) {
+            if (column) {
+              emit('cellDoubleClick', getCellParams(node.id, node.row, column), event);
+            }
+            emit('rowDoubleClick', { id: node.id, row: node.row }, event);
+          }
           if (column && isEditable(column, node)) {
             if (editMode === 'row') {
               startRowEdit(node.id);
@@ -973,7 +1419,7 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
             }
           }
         }}
-        sx={{ height: rowHeight, width: totalWidth, ...extraSx }}
+        sx={{ height: rowHeightFor(node), width: totalWidth, ...extraSx }}
       >
         {columns.map((column, index) => {
           const editingCell = edit !== null && column.field in edit.values && isEditable(column, node);
@@ -988,8 +1434,16 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
               data-rowindex={rowIndex ?? undefined}
               data-colindex={index}
               aria-colindex={index + 1}
+              className={node.row && getCellClassName && !SPECIAL_FIELDS.has(column.field) ? getCellClassName(getCellParams(node.id, row, column)) : undefined}
               tabIndex={rowIndex !== null && focused && !editingCell ? 0 : -1}
-              onClick={() => rowIndex !== null && setFocusPosition({ row: rowIndex, col: index })}
+              onClick={(event) => {
+                if (rowIndex !== null) {
+                  setFocusPosition({ row: rowIndex, col: index });
+                }
+                if (node.row && !SPECIAL_FIELDS.has(column.field)) {
+                  emit('cellClick', getCellParams(node.id, node.row, column), event);
+                }
+              }}
               sx={{ ...cellSx(index, false), outlineOffset: -2, '&:focus-visible': { outline: '2px solid', outlineColor: 'primary.main' } }}
             >
               {editingCell && edit ? renderEditor(column, node, row, edit) : renderValue(column, node, row)}
@@ -1023,7 +1477,10 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
         onDragStart={reorderable ? () => (dragFieldRef.current = column.field) : undefined}
         onDragOver={reorderable ? (event) => event.preventDefault() : undefined}
         onDrop={reorderable ? (event) => handleDrop(event, column) : undefined}
-        onClick={(event) => handleSort(column, event)}
+        onClick={(event) => {
+          emit('columnHeaderClick', { field: column.field, colDef: column }, event);
+          handleSort(column, event);
+        }}
         sx={{
           ...cellSx(index, true),
           cursor: sortable ? 'pointer' : 'default',
@@ -1082,6 +1539,14 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
             aria-orientation="vertical"
             onPointerDown={(event) => startResize(event, column, widths[index] ?? 0)}
             onClick={(event) => event.stopPropagation()}
+            onDoubleClick={
+              disableAutosize
+                ? undefined
+                : (event) => {
+                    event.stopPropagation();
+                    autosizeColumns({ columns: [column.field] });
+                  }
+            }
             sx={{
               position: 'absolute',
               top: 0,
@@ -1123,9 +1588,18 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     onDensityChange: setDensity,
     localeText,
     exportDataAsCsv: () => exportDataAsCsv(),
-    print,
+    print: () => print(),
+    disableColumnSelector,
+    disableDensitySelector,
+    disableFilterSelector: disableColumnFilter,
   };
-  const Toolbar = slots?.toolbar ?? GridToolbar;
+  const Toolbar: ComponentType<GridToolbarProps<any>> = slots?.toolbar ?? GridToolbar;
+  const FilterPanel: ComponentType<GridFilterPanelSlotProps<any>> = slots?.filterPanel ?? GridFilterPanel;
+  const ColumnsPanel: ComponentType<GridColumnsPanelSlotProps<any>> = slots?.columnsPanel ?? GridColumnsPanel;
+  const NoRowsOverlay = slots?.noRowsOverlay;
+  const LoadingOverlay = slots?.loadingOverlay;
+  const FooterSlot = slots?.footer;
+  const PaginationSlot = slots?.pagination;
   const showFooter = !hideFooter;
   const footerRowCount = paginationMode === 'server' ? (rowCount ?? totalRowCount) : totalRowCount;
   const bottomRows = pinnedRows?.bottom ?? EMPTY_ARRAY;
@@ -1141,7 +1615,7 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
         ...(Array.isArray(sx) ? sx : [sx]),
       ]}
     >
-      {showToolbar && <Toolbar {...toolbarProps} />}
+      {showToolbar && <Toolbar {...toolbarProps} {...slotProps?.toolbar} />}
       {renderColumnMenu()}
       <Popover
         open={menuPanel !== null}
@@ -1150,21 +1624,33 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
         anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
       >
         {menuPanel?.kind === 'filter' && (
-          <GridFilterPanel columns={userColumns} filterModel={filterModel} onFilterModelChange={setFilterModel} localeText={localeText} />
+          <FilterPanel
+            columns={userColumns}
+            filterModel={filterModel}
+            onFilterModelChange={setFilterModel}
+            localeText={localeText}
+            {...slotProps?.filterPanel}
+          />
         )}
         {menuPanel?.kind === 'columns' && (
-          <GridColumnsPanel
+          <ColumnsPanel
             columns={userColumns}
             columnVisibilityModel={effectiveVisibility}
             onColumnVisibilityModelChange={setVisibilityModel}
             localeText={localeText}
+            {...slotProps?.columnsPanel}
           />
         )}
       </Popover>
-      {loading && <LinearProgress aria-label={localeText.loadingLabel} sx={{ position: 'absolute', left: 0, right: 0, top: 0, zIndex: 5 }} />}
+      {loading &&
+        (LoadingOverlay ? (
+          <LoadingOverlay localeText={localeText} {...slotProps?.loadingOverlay} />
+        ) : (
+          <LinearProgress aria-label={localeText.loadingLabel} sx={{ position: 'absolute', left: 0, right: 0, top: 0, zIndex: 5 }} />
+        ))}
       <TableContainer
         ref={scrollerRef}
-        onScroll={virtualize ? (event) => setScrollTop(event.currentTarget.scrollTop) : undefined}
+        onScroll={handleScroll}
         onKeyDown={handleKeyDown}
         sx={{ height: autoHeight ? 'auto' : height, position: 'relative', overflow: 'auto' }}
       >
@@ -1239,7 +1725,7 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
                   role="gridcell"
                   sx={{ position: 'sticky', left: 0, width: containerWidth || '100%', minHeight: rowHeight * 2, justifyContent: 'center', color: 'text.secondary' }}
                 >
-                  {localeText.noRowsLabel}
+                  {NoRowsOverlay ? <NoRowsOverlay localeText={localeText} {...slotProps?.noRowsOverlay} /> : localeText.noRowsLabel}
                 </TableCell>
               </TableRow>
             )}
@@ -1264,12 +1750,26 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
           )}
         </Table>
       </TableContainer>
-      {showFooter && (
+      {showFooter && FooterSlot && (
+        <FooterSlot selectedRowCount={selection.length} rowCount={footerRowCount} localeText={localeText} {...slotProps?.footer} />
+      )}
+      {showFooter && !FooterSlot && (
         <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderTop: 1, borderColor: 'var(--DnaDataGrid-border)' }}>
           <Box sx={{ pl: 2, color: 'text.secondary' }}>
-            {selection.length > 0 && (checkboxSelection || rowSelection) ? localeText.footerRowsSelected(selection.length) : null}
+            {!hideFooterSelectedRowCount && selection.length > 0 && (checkboxSelection || rowSelection) ? localeText.footerRowsSelected(selection.length) : null}
           </Box>
-          {pagination && (
+          {pagination && !hideFooterPagination && PaginationSlot && (
+            <PaginationSlot
+              count={footerRowCount}
+              page={paginationMode === 'server' ? paginationModel.page : page}
+              pageSize={paginationModel.pageSize}
+              pageSizeOptions={pageSizeOptions}
+              onPaginationModelChange={setPaginationModel}
+              localeText={localeText}
+              {...slotProps?.pagination}
+            />
+          )}
+          {pagination && !hideFooterPagination && !PaginationSlot && (
             <TablePagination
               component="div"
               count={footerRowCount}

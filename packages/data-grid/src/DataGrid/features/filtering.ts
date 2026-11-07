@@ -221,11 +221,16 @@ export function getFilterPredicate<R extends GridValidRowModel>(
   const searchable = quickFilterColumns.filter(isFilterable);
   if (quickValues.length > 0 && searchable.length > 0) {
     const matches = (row: R, value: string) =>
-      searchable.some(
-        (column) =>
+      searchable.some((column) => {
+        if (column.getApplyQuickFilterFn) {
+          const test = column.getApplyQuickFilterFn(value, column);
+          return test ? test(getCellValue(row, column), row) : false;
+        }
+        return (
           getFormattedValue(row, column).toLowerCase().includes(value) ||
-          toText(getCellValue(row, column)).includes(value),
-      );
+          toText(getCellValue(row, column)).includes(value)
+        );
+      });
     predicates.push(
       model.quickFilterLogicOperator === 'or'
         ? (row) => quickValues.some((value) => matches(row, value))

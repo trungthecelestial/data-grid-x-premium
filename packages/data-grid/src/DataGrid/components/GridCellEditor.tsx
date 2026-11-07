@@ -3,7 +3,7 @@ import InputBase from '@mui/material/InputBase';
 import MenuItem from '@mui/material/MenuItem';
 import Select from '@mui/material/Select';
 import type { FocusEvent, KeyboardEvent } from 'react';
-import type { GridColDef, GridValidRowModel } from '../DataGrid.types';
+import type { GridColDef, GridEditStopReason, GridValidRowModel } from '../DataGrid.types';
 import { getValueOptions } from '../features/columns';
 
 export interface GridCellEditorProps<R extends GridValidRowModel> {
@@ -13,7 +13,7 @@ export interface GridCellEditorProps<R extends GridValidRowModel> {
   /** Saves when focus leaves the editor. Used by cell edit mode. */
   commitOnBlur?: boolean;
   onChange: (value: unknown) => void;
-  onCommit: () => void;
+  onCommit: (reason?: GridEditStopReason) => void;
   onCancel: () => void;
 }
 
@@ -38,7 +38,7 @@ export function GridCellEditor<R extends GridValidRowModel>(props: GridCellEdito
     if (event.key === 'Enter') {
       event.preventDefault();
       event.stopPropagation();
-      onCommit();
+      onCommit('enterKeyDown');
     } else if (event.key === 'Escape') {
       event.preventDefault();
       event.stopPropagation();
@@ -48,7 +48,7 @@ export function GridCellEditor<R extends GridValidRowModel>(props: GridCellEdito
 
   const handleBlur = (event: FocusEvent<HTMLElement>) => {
     if (commitOnBlur && !event.currentTarget.contains(event.relatedTarget as Node | null)) {
-      onCommit();
+      onCommit('cellFocusOut');
     }
   };
 

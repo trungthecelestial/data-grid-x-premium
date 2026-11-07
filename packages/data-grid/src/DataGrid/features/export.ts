@@ -4,10 +4,17 @@ import { getCellValue, getFormattedValue } from './columns';
 export interface CsvOptions {
   delimiter?: string;
   includeHeaders?: boolean;
+  /** Writes raw values instead of the formatted ones. */
+  raw?: boolean;
+  /** Prepends a byte order mark so Excel reads the file as UTF-8. */
+  utf8WithBom?: boolean;
 }
 
-function exportValue<R extends GridValidRowModel>(row: R, column: GridColDef<R>): string {
+function exportValue<R extends GridValidRowModel>(row: R, column: GridColDef<R>, raw = false): string {
   const value = getCellValue(row, column);
+  if (raw) {
+    return value === null || value === undefined ? '' : value instanceof Date ? value.toISOString() : String(value);
+  }
   if (typeof value === 'number' || typeof value === 'boolean') {
     return column.valueFormatter ? column.valueFormatter(value, row) : String(value);
   }
@@ -23,16 +30,16 @@ function escapeCsv(value: string, delimiter: string): string {
 export function buildCsv<R extends GridValidRowModel>(
   rows: readonly R[],
   columns: readonly GridColDef<R>[],
-  { delimiter = ',', includeHeaders = true }: CsvOptions = {},
+  { delimiter = ',', includeHeaders = true, raw = false, utf8WithBom = false }: CsvOptions = {},
 ): string {
   const lines: string[] = [];
   if (includeHeaders) {
     lines.push(columns.map((column) => escapeCsv(column.headerName ?? column.field, delimiter)).join(delimiter));
   }
   for (const row of rows) {
-    lines.push(columns.map((column) => escapeCsv(exportValue(row, column), delimiter)).join(delimiter));
+    lines.push(columns.map((column) => escapeCsv(exportValue(row, column, raw), delimiter)).join(delimiter));
   }
-  return lines.join('\r\n');
+  return (utf8WithBom ? '﻿' : '') + lines.join('\r\n');
 }
 
 const escapeHtml = (value: string) =>
@@ -42,12 +49,14 @@ export function buildPrintHtml<R extends GridValidRowModel>(
   rows: readonly R[],
   columns: readonly GridColDef<R>[],
   title = 'Data grid',
+  pageStyle = '',
+  raw = false,
 ): string {
   const head = columns.map((column) => `<th>${escapeHtml(column.headerName ?? column.field)}</th>`).join('');
   const body = rows
-    .map((row) => `<tr>${columns.map((column) => `<td>${escapeHtml(exportValue(row, column))}</td>`).join('')}</tr>`)
+    .map((row) => `<tr>${columns.map((column) => `<td>${escapeHtml(exportValue(row, column, raw))}</td>`).join('')}</tr>`)
     .join('');
-  return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title><style>body{font-family:Roboto,Arial,sans-serif;font-size:14px}table{border-collapse:collapse;width:100%}th,td{border:1px solid #ccc;padding:6px 10px;text-align:left}th{background:#f5f5f5}</style></head><body><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></body></html>`;
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title><style>body{font-family:Roboto,Arial,sans-serif;font-size:14px}table{border-collapse:collapse;width:100%}th,td{border:1px solid #ccc;padding:6px 10px;text-align:left}th{background:#f5f5f5}${pageStyle}</style></head><body><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></body></html>`;
 }
 
 export function downloadFile(fileName: string, content: string, type: string): void {

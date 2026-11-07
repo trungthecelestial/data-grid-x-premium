@@ -1,5 +1,5 @@
 import type { SxProps, Theme } from '@mui/material/styles';
-import type { ComponentType, MutableRefObject, ReactNode } from 'react';
+import type { ComponentType, KeyboardEvent, MouseEvent, MutableRefObject, ReactNode } from 'react';
 
 export type GridRowId = string | number;
 
@@ -139,9 +139,63 @@ export interface GridColDef<R extends GridValidRowModel = GridValidRowModel> {
   renderCell?: (params: GridRenderCellParams<R>) => ReactNode;
   renderHeader?: (params: { colDef: GridColDef<R> }) => ReactNode;
   renderEditCell?: (params: GridRenderEditCellParams<R>) => ReactNode;
+  /** Builds the quick-filter predicate for one search term, or `null` to skip this column for it. Defaults to a case-insensitive text match. */
+  getApplyQuickFilterFn?: (value: string, column: GridColDef<R>) => ((cellValue: unknown, row: R) => boolean) | null;
   /** Actions shown in a `actions` column. */
   getActions?: (params: { id: GridRowId; row: R; field: string }) => ReactNode[];
 }
+
+export interface GridRowParams<R extends GridValidRowModel = GridValidRowModel> {
+  id: GridRowId;
+  row: R;
+}
+
+export interface GridCellParams<R extends GridValidRowModel = GridValidRowModel> extends GridRowParams<R> {
+  field: string;
+  value: unknown;
+  formattedValue: string;
+  colDef: GridColDef<R>;
+}
+
+export interface GridColumnHeaderParams<R extends GridValidRowModel = GridValidRowModel> {
+  field: string;
+  colDef: GridColDef<R>;
+}
+
+export type GridEditStopReason = 'enterKeyDown' | 'escapeKeyDown' | 'cellFocusOut' | 'api';
+
+export interface GridCellEditParams {
+  id: GridRowId;
+  field: string;
+}
+
+export interface GridCellEditStopParams extends GridCellEditParams {
+  reason: GridEditStopReason;
+}
+
+export interface GridRowClassNameParams<R extends GridValidRowModel = GridValidRowModel> extends GridRowParams<R> {
+  /** Index of the row among the rows on the current page. */
+  indexRelativeToCurrentPage: number;
+}
+
+export interface GridCellClassNameParams<R extends GridValidRowModel = GridValidRowModel> extends GridCellParams<R> {}
+
+/** Names of the events a consumer can subscribe to through `apiRef.subscribeEvent`. */
+export interface GridEventMap {
+  rowClick: [params: GridRowParams<any>, event: unknown];
+  rowDoubleClick: [params: GridRowParams<any>, event: unknown];
+  cellClick: [params: GridCellParams<any>, event: unknown];
+  cellDoubleClick: [params: GridCellParams<any>, event: unknown];
+  cellKeyDown: [params: GridCellParams<any>, event: unknown];
+  columnHeaderClick: [params: GridColumnHeaderParams<any>, event: unknown];
+  cellEditStart: [params: GridCellEditParams];
+  cellEditStop: [params: GridCellEditStopParams];
+  rowEditStart: [params: { id: GridRowId }];
+  rowEditStop: [params: { id: GridRowId; reason: GridEditStopReason }];
+  rowsScrollEnd: [params: { visibleRowsCount: number; viewportPageSize: number }];
+}
+
+export type GridEventName = keyof GridEventMap;
 
 export interface GridInitialState {
   sorting?: { sortModel?: GridSortModel };
@@ -219,26 +273,204 @@ export interface GridToolbarProps<R extends GridValidRowModel = GridValidRowMode
   localeText: GridLocaleText;
   exportDataAsCsv: () => void;
   print: () => void;
+  /** Hides the "Columns" button. */
+  disableColumnSelector?: boolean;
+  /** Hides the "Density" button. */
+  disableDensitySelector?: boolean;
+  /** Hides the "Filters" button. */
+  disableFilterSelector?: boolean;
+  /** Hides the quick filter input. */
+  disableQuickFilter?: boolean;
+  /** Hides the "Export" button. */
+  disableExport?: boolean;
+}
+
+export interface GridOverlayProps {
+  localeText: GridLocaleText;
+}
+
+export interface GridFooterProps {
+  selectedRowCount: number;
+  rowCount: number;
+  localeText: GridLocaleText;
+}
+
+export interface GridPaginationSlotProps {
+  count: number;
+  page: number;
+  pageSize: number;
+  pageSizeOptions: readonly number[];
+  onPaginationModelChange: (model: GridPaginationModel) => void;
+  localeText: GridLocaleText;
+}
+
+export interface GridFilterPanelSlotProps<R extends GridValidRowModel = GridValidRowModel> {
+  columns: readonly GridColDef<R>[];
+  filterModel: GridFilterModel;
+  onFilterModelChange: (model: GridFilterModel) => void;
+  localeText: GridLocaleText;
+}
+
+export interface GridColumnsPanelSlotProps<R extends GridValidRowModel = GridValidRowModel> {
+  columns: readonly GridColDef<R>[];
+  columnVisibilityModel: GridColumnVisibilityModel;
+  onColumnVisibilityModelChange: (model: GridColumnVisibilityModel) => void;
+  localeText: GridLocaleText;
 }
 
 export interface GridSlots {
   toolbar?: ComponentType<GridToolbarProps<any>>;
+  /** Replaces the column header menu. Receives the props of the built-in `GridColumnMenu`. */
+  columnMenu?: ComponentType<any>;
+  noRowsOverlay?: ComponentType<GridOverlayProps>;
+  loadingOverlay?: ComponentType<GridOverlayProps>;
+  /** Replaces the whole footer, including pagination. */
+  footer?: ComponentType<GridFooterProps>;
+  /** Replaces the pagination control inside the default footer. */
+  pagination?: ComponentType<GridPaginationSlotProps>;
+  filterPanel?: ComponentType<GridFilterPanelSlotProps<any>>;
+  columnsPanel?: ComponentType<GridColumnsPanelSlotProps<any>>;
+}
+
+/** Extra props merged into the props each slot receives. */
+export interface GridSlotProps {
+  toolbar?: Partial<GridToolbarProps<any>> & Record<string, unknown>;
+  columnMenu?: Record<string, unknown>;
+  noRowsOverlay?: Record<string, unknown>;
+  loadingOverlay?: Record<string, unknown>;
+  footer?: Record<string, unknown>;
+  pagination?: Record<string, unknown>;
+  filterPanel?: Record<string, unknown>;
+  columnsPanel?: Record<string, unknown>;
 }
 
 export interface GridEditStopParams {
   ignoreModifications?: boolean;
 }
 
+export interface GridCsvExportOptions {
+  fileName?: string;
+  delimiter?: string;
+  /** Exports only these fields, in this order. Hidden columns are included when listed. */
+  fields?: string[];
+  /** Exports hidden columns too. */
+  allColumns?: boolean;
+  includeHeaders?: boolean;
+  /** Prepends a byte order mark so Excel reads the file as UTF-8. Defaults to false. */
+  utf8WithBom?: boolean;
+  /** Picks the rows to export. Defaults to every filtered row. */
+  getRowsToExport?: (params: { apiRef: GridApi }) => GridRowId[];
+}
+
+export interface GridPrintExportOptions {
+  /** Document title. */
+  fileName?: string;
+  fields?: string[];
+  allColumns?: boolean;
+  /** Extra CSS appended to the printed document. */
+  pageStyle?: string;
+  getRowsToExport?: (params: { apiRef: GridApi }) => GridRowId[];
+}
+
+export interface GridScrollParams {
+  left?: number;
+  top?: number;
+}
+
+export interface GridScrollToIndexesParams {
+  rowIndex?: number;
+  colIndex?: number;
+}
+
+export interface GridRowUpdate {
+  /** The row's id, or the field `getRowId` reads it from. */
+  id?: GridRowId;
+  [key: string]: any;
+  /** Set to `delete` to remove the row. */
+  _action?: 'delete';
+}
+
+export interface GridAutosizeOptions {
+  /** Fields to resize. Defaults to every visible column. */
+  columns?: string[];
+  /** Counts header text when measuring. Defaults to true. */
+  includeHeaders?: boolean;
+  /** Extra width added to each measured column in px. Defaults to 0. */
+  extraWidth?: number;
+  /** Rows sampled when measuring. Defaults to 1000. */
+  maxRows?: number;
+}
+
 export interface GridApi {
-  exportDataAsCsv: (options?: { fileName?: string; delimiter?: string }) => void;
-  getDataAsCsv: (options?: { delimiter?: string }) => string;
-  print: () => void;
+  exportDataAsCsv: (options?: GridCsvExportOptions) => void;
+  getDataAsCsv: (options?: Omit<GridCsvExportOptions, 'fileName'>) => string;
+  print: (options?: GridPrintExportOptions) => void;
   startCellEditMode: (params: { id: GridRowId; field: string }) => void;
   startRowEditMode: (params: { id: GridRowId }) => void;
   stopEditMode: (params?: GridEditStopParams) => void;
   setRowSelectionModel: (model: GridRowSelectionModel) => void;
   setColumnVisibility: (field: string, visible: boolean) => void;
   getRowModels: () => Map<GridRowId, GridValidRowModel>;
+
+  getRow: (id: GridRowId) => GridValidRowModel | null;
+  getRowId: (row: GridValidRowModel) => GridRowId;
+  /** Ids of every row, after filtering and sorting. */
+  getAllRowIds: () => GridRowId[];
+  getRowsCount: () => number;
+  /** Position of a row among the filtered and sorted rows, or -1. */
+  getRowIndexRelativeToVisibleRows: (id: GridRowId) => number;
+  /** Adds, merges into, or (with `_action: 'delete'`) removes rows without changing the `rows` prop. */
+  updateRows: (updates: GridRowUpdate[]) => void;
+  getCellValue: (id: GridRowId, field: string) => unknown;
+
+  getSortModel: () => GridSortModel;
+  setSortModel: (model: GridSortModel) => void;
+  getFilterModel: () => GridFilterModel;
+  setFilterModel: (model: GridFilterModel) => void;
+  setQuickFilterValues: (values: string[]) => void;
+  getPaginationModel: () => GridPaginationModel;
+  setPaginationModel: (model: GridPaginationModel) => void;
+  setPage: (page: number) => void;
+  setPageSize: (pageSize: number) => void;
+  getDensity: () => GridDensity;
+  setDensity: (density: GridDensity) => void;
+
+  selectRow: (id: GridRowId, isSelected?: boolean, resetSelection?: boolean) => void;
+  selectRows: (ids: readonly GridRowId[], isSelected?: boolean, resetSelection?: boolean) => void;
+  isRowSelected: (id: GridRowId) => boolean;
+  getSelectedRows: () => Map<GridRowId, GridValidRowModel>;
+
+  getAllColumns: () => GridColDef<any>[];
+  getVisibleColumns: () => GridColDef<any>[];
+  getColumn: (field: string) => GridColDef<any> | undefined;
+  getColumnIndex: (field: string, useVisibleColumns?: boolean) => number;
+  setColumnWidth: (field: string, width: number) => void;
+  setColumnIndex: (field: string, targetIndex: number) => void;
+  /** Resizes columns to fit their content. */
+  autosizeColumns: (options?: GridAutosizeOptions) => void;
+  getPinnedColumns: () => GridPinnedColumns;
+  setPinnedColumns: (pinned: GridPinnedColumns) => void;
+  pinColumn: (field: string, side: 'left' | 'right') => void;
+  unpinColumn: (field: string) => void;
+
+  setAggregationModel: (model: GridAggregationModel) => void;
+  setRowGroupingModel: (model: string[]) => void;
+  toggleDetailPanel: (id: GridRowId) => void;
+  getExpandedDetailPanels: () => GridRowId[];
+  setRowChildrenExpansion: (id: GridRowId, isExpanded: boolean) => void;
+
+  /** Scrolls the grid to a pixel offset. */
+  scroll: (params: GridScrollParams) => void;
+  getScrollPosition: () => { top: number; left: number };
+  /** Scrolls so the cell at the given row and column is in view. */
+  scrollToIndexes: (params: GridScrollToIndexesParams) => void;
+  setCellFocus: (id: GridRowId, field: string) => void;
+
+  /** Snapshot of the sorting, filter, pagination, column, density, selection, aggregation and grouping state. */
+  exportState: () => GridInitialState;
+  restoreState: (state: GridInitialState) => void;
+  /** Listens to a grid event. Returns the function that stops listening. */
+  subscribeEvent: <E extends GridEventName>(event: E, handler: (...args: GridEventMap[E]) => void) => () => void;
 }
 
 export type GridApiRef = MutableRefObject<GridApi>;
@@ -338,4 +570,56 @@ export interface DataGridProps<R extends GridValidRowModel = GridValidRowModel> 
   onDetailPanelExpandedRowIdsChange?: (ids: GridRowId[]) => void;
 
   pinnedRows?: GridPinnedRows<R>;
+
+  onRowClick?: (params: GridRowParams<R>, event: MouseEvent) => void;
+  onRowDoubleClick?: (params: GridRowParams<R>, event: MouseEvent) => void;
+  onCellClick?: (params: GridCellParams<R>, event: MouseEvent) => void;
+  onCellDoubleClick?: (params: GridCellParams<R>, event: MouseEvent) => void;
+  onCellKeyDown?: (params: GridCellParams<R>, event: KeyboardEvent) => void;
+  onColumnHeaderClick?: (params: GridColumnHeaderParams<R>, event: MouseEvent) => void;
+  onCellEditStart?: (params: GridCellEditParams) => void;
+  onCellEditStop?: (params: GridCellEditStopParams) => void;
+  onRowEditStart?: (params: { id: GridRowId }) => void;
+  onRowEditStop?: (params: { id: GridRowId; reason: GridEditStopReason }) => void;
+  /** Called once each time the scroll position reaches the bottom. Use it to load the next batch of rows. */
+  onRowsScrollEnd?: (params: { visibleRowsCount: number; viewportPageSize: number }) => void;
+  /** Distance from the bottom in px at which `onRowsScrollEnd` fires. Defaults to 80. */
+  scrollEndThreshold?: number;
+
+  /** Class name added to each row. */
+  getRowClassName?: (params: GridRowClassNameParams<R>) => string;
+  /** Class name added to each cell. */
+  getCellClassName?: (params: GridCellClassNameParams<R>) => string;
+  /** Height of one row in px. Return `null` to use `rowHeight`. */
+  getRowHeight?: (params: GridRowParams<R>) => number | null;
+  /** Decides per cell whether it can be edited, on top of the column's `editable`. */
+  isCellEditable?: (params: GridCellParams<R>) => boolean;
+
+  slotProps?: GridSlotProps;
+  hideFooterPagination?: boolean;
+  hideFooterSelectedRowCount?: boolean;
+  /** Hides the "Columns" button of the toolbar. */
+  disableColumnSelector?: boolean;
+  /** Hides the "Density" button of the toolbar. */
+  disableDensitySelector?: boolean;
+  /** Keeps selected ids that are no longer in `rows`. Defaults to false. */
+  keepNonExistentRowsSelected?: boolean;
+  /** The header checkbox then selects only the rows on the current page. */
+  checkboxSelectionVisibleOnly?: boolean;
+  showCellVerticalBorder?: boolean;
+  showColumnVerticalBorder?: boolean;
+  /** Exports raw cell values instead of the formatted ones. */
+  ignoreValueFormatterDuringExport?: boolean;
+  /** Called after Ctrl/Cmd+C with the text put on the clipboard. */
+  onClipboardCopy?: (text: string) => void;
+  /** Turns off copying the selected rows, or the focused cell, with Ctrl/Cmd+C. */
+  disableClipboardCopy?: boolean;
+  /** Called after a column is auto-sized. */
+  onColumnAutosize?: (widths: Record<string, number>) => void;
+  /** Turns off double-click on a column border to fit the column to its content. */
+  disableAutosize?: boolean;
+  /** Options applied to the toolbar's CSV export. */
+  csvOptions?: Omit<GridCsvExportOptions, 'getRowsToExport'>;
+  /** Options applied to the toolbar's print export. */
+  printOptions?: GridPrintExportOptions;
 }

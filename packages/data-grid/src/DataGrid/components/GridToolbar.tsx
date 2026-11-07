@@ -37,6 +37,11 @@ export function GridToolbar<R extends GridValidRowModel = GridValidRowModel>(pro
     localeText,
     exportDataAsCsv,
     print,
+    disableColumnSelector,
+    disableDensitySelector,
+    disableFilterSelector,
+    disableQuickFilter,
+    disableExport,
   } = props;
 
   const [panel, setPanel] = useState<PanelName>(null);
@@ -66,63 +71,73 @@ export function GridToolbar<R extends GridValidRowModel = GridValidRowModel>(pro
 
   return (
     <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, p: '4px 4px 0', mb: 1, flexWrap: 'wrap' }} role="toolbar">
-      <Button size="small" color="inherit" sx={buttonSx} startIcon={<ViewColumnIcon />} onClick={open('columns')}>
-        {localeText.toolbarColumns}
-      </Button>
-      <Button
-        size="small"
-        color="inherit"
-        sx={buttonSx}
-        startIcon={
-          <Badge badgeContent={activeFilters} color="primary">
-            <FilterListIcon />
-          </Badge>
-        }
-        onClick={open('filters')}
-      >
-        {localeText.toolbarFilters}
-      </Button>
-      <Button size="small" color="inherit" sx={buttonSx} startIcon={<DensityIcon />}onClick={open('density')}>
-        {localeText.toolbarDensity}
-      </Button>
-      <Button size="small" color="inherit" sx={buttonSx} startIcon={<FileDownloadIcon />} onClick={open('export')}>
-        {localeText.toolbarExport}
-      </Button>
+      {!disableColumnSelector && (
+        <Button size="small" color="inherit" sx={buttonSx} startIcon={<ViewColumnIcon />} onClick={open('columns')}>
+          {localeText.toolbarColumns}
+        </Button>
+      )}
+      {!disableFilterSelector && (
+        <Button
+          size="small"
+          color="inherit"
+          sx={buttonSx}
+          startIcon={
+            <Badge badgeContent={activeFilters} color="primary">
+              <FilterListIcon />
+            </Badge>
+          }
+          onClick={open('filters')}
+        >
+          {localeText.toolbarFilters}
+        </Button>
+      )}
+      {!disableDensitySelector && (
+        <Button size="small" color="inherit" sx={buttonSx} startIcon={<DensityIcon />} onClick={open('density')}>
+          {localeText.toolbarDensity}
+        </Button>
+      )}
+      {!disableExport && (
+        <Button size="small" color="inherit" sx={buttonSx} startIcon={<FileDownloadIcon />} onClick={open('export')}>
+          {localeText.toolbarExport}
+        </Button>
+      )}
       <Box sx={{ flex: 1, order: -1 }} />
-      <TextField
-        size="small"
-        variant="filled"
-        hiddenLabel
-        placeholder={localeText.toolbarQuickFilterPlaceholder}
-        value={quickValue}
-        sx={{
-          order: -2,
-          minWidth: 240,
-          '& .MuiInputBase-input': { paddingInline: '0px !important' },
-          '& .MuiInputBase-root': {
-            padding: '2px 12px !important',
-            height: '32px',
-            '& .MuiSvgIcon-root': { width: '20px !important', height: '20px !important' },
-          },
-          '& .MuiIconButton-sizeSmall': { padding: '2px !important' },
-        }}
-        onChange={(event) => setQuickFilter(event.target.value)}
-        inputProps={{ 'aria-label': localeText.toolbarQuickFilterPlaceholder }}
-        InputProps={{
-          startAdornment: (
-            <InputAdornment position="start">
-              <SearchIcon fontSize="small" />
-            </InputAdornment>
-          ),
-          endAdornment: quickValue ? (
-            <InputAdornment position="end">
-              <IconButton size="small" aria-label={localeText.toolbarQuickFilterClear} onClick={() => setQuickFilter('')}>
-                <ClearIcon fontSize="small" />
-              </IconButton>
-            </InputAdornment>
-          ) : null,
-        }}
-      />
+      {!disableQuickFilter && (
+        <TextField
+          size="small"
+          variant="filled"
+          hiddenLabel
+          placeholder={localeText.toolbarQuickFilterPlaceholder}
+          value={quickValue}
+          sx={{
+            order: -2,
+            minWidth: 240,
+            '& .MuiInputBase-input': { paddingInline: '0px !important' },
+            '& .MuiInputBase-root': {
+              padding: '2px 12px !important',
+              height: '32px',
+              '& .MuiSvgIcon-root': { width: '20px !important', height: '20px !important' },
+            },
+            '& .MuiIconButton-sizeSmall': { padding: '2px !important' },
+          }}
+          onChange={(event) => setQuickFilter(event.target.value)}
+          inputProps={{ 'aria-label': localeText.toolbarQuickFilterPlaceholder }}
+          InputProps={{
+            startAdornment: (
+              <InputAdornment position="start">
+                <SearchIcon fontSize="small" />
+              </InputAdornment>
+            ),
+            endAdornment: quickValue ? (
+              <InputAdornment position="end">
+                <IconButton size="small" aria-label={localeText.toolbarQuickFilterClear} onClick={() => setQuickFilter('')}>
+                  <ClearIcon fontSize="small" />
+                </IconButton>
+              </InputAdornment>
+            ) : null,
+          }}
+        />
+      )}
 
       <Popover
         open={panel === 'columns'}
