@@ -66,7 +66,7 @@ function Overview() {
         checkboxSelection
         headerFilters
         height={520}
-        pageSizeOptions={[25, 50, 100]}
+        pageSizeOptions={[25, 50, 100, { value: -1, label: 'All' }]}
         initialState={{
           pinnedColumns: { left: ['name'] },
           sorting: { sortModel: [{ field: 'salary', sort: 'desc' }] },
@@ -126,6 +126,19 @@ function RowReordering() {
         pagination={false}
         height={520}
       />
+    </>
+  );
+}
+
+const cellRows = employees.slice(0, 15);
+
+function CellSelection() {
+  return (
+    <>
+      <Typography variant="body2" sx={{ mb: 1 }}>
+        Drag, Shift+click or Shift+Arrow to select a range, Ctrl/Cmd+click to toggle a cell. Ctrl/Cmd+C copies it, Ctrl/Cmd+V pastes tab separated text into editable cells.
+      </Typography>
+      <DataGrid rows={cellRows} columns={columns} cellSelection pagination={false} height={520} />
     </>
   );
 }
@@ -194,6 +207,7 @@ const TABS = [
   { label: 'Virtualized (1000 rows)', element: <Virtualized /> },
   { label: 'Wide (60 columns)', element: <WideColumns /> },
   { label: 'Row reordering', element: <RowReordering /> },
+  { label: 'Cell selection', element: <CellSelection /> },
   { label: 'Tree data', element: <TreeData /> },
   { label: 'Row grouping', element: <RowGrouping /> },
   { label: 'Master-detail', element: <MasterDetail /> },

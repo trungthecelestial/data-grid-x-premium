@@ -33,15 +33,30 @@ export interface ValueInputProps<R extends GridValidRowModel> {
   onChange: (value: unknown) => void;
   /** Fills the width of the parent instead of the panel's fixed 140px. */
   fullWidth?: boolean;
+  /** Defaults to `standard`. The header filter row uses `filled`, like the toolbar's quick filter. */
+  variant?: 'standard' | 'filled';
 }
 
+// Same compact filled field as the toolbar's quick filter: 32px tall with 12px side padding.
+// A text field carries the root styles on a child, while a select is the input root itself, so both selectors are needed.
+const getFilledSx = (width: number | string) => ({
+  width,
+  '&.MuiInputBase-root, & .MuiInputBase-root': { height: 32 },
+  '& .MuiSvgIcon-root': { width: 20, height: 20 },
+  '& .MuiSelect-icon': { right: 8, top: 'calc(50% - 10px)' },
+  '& .MuiInputBase-input': { py: 0, px: '12px', height: '32px', boxSizing: 'border-box' },
+  '&& .MuiSelect-select': { display: 'flex', alignItems: 'center', height: '32px', minHeight: 0, py: 0, pl: '12px', pr: '32px', boxSizing: 'border-box' },
+});
+
 export function FilterValueInput<R extends GridValidRowModel>(props: ValueInputProps<R>) {
-  const { column, operator, item, localeText, onChange, fullWidth } = props;
+  const { column, operator, item, localeText, onChange, fullWidth, variant = 'standard' } = props;
   const label = localeText.filterPanelValue;
   const width = fullWidth ? '100%' : 140;
+  const filled = variant === 'filled';
+  const fieldSx = filled ? getFilledSx(width) : { width };
 
   if (!operator || operator.requiresFilterValue === false) {
-    return <Box sx={{ width }} />;
+    return <Box sx={fieldSx} />;
   }
 
   if (operator.inputType === 'multi' && column.type === 'singleSelect') {
@@ -49,8 +64,8 @@ export function FilterValueInput<R extends GridValidRowModel>(props: ValueInputP
       <Select
         multiple
         size="small"
-        variant="standard"
-        sx={{ width }}
+        variant={variant}
+        sx={fieldSx}
         value={Array.isArray(item.value) ? item.value : []}
         onChange={(event) => onChange(event.target.value)}
         inputProps={{ 'aria-label': label }}
@@ -68,8 +83,9 @@ export function FilterValueInput<R extends GridValidRowModel>(props: ValueInputP
     return (
       <TextField
         size="small"
-        variant="standard"
-        sx={{ width }}
+        variant={variant}
+        hiddenLabel={filled}
+        sx={fieldSx}
         placeholder="a, b, c"
         value={Array.isArray(item.value) ? item.value.join(', ') : ''}
         onChange={(event) =>
@@ -96,9 +112,9 @@ export function FilterValueInput<R extends GridValidRowModel>(props: ValueInputP
     return (
       <Select
         size="small"
-        variant="standard"
+        variant={variant}
         displayEmpty
-        sx={{ width }}
+        sx={fieldSx}
         value={item.value ?? ''}
         onChange={(event) => onChange(event.target.value)}
         inputProps={{ 'aria-label': label }}
@@ -116,8 +132,9 @@ export function FilterValueInput<R extends GridValidRowModel>(props: ValueInputP
   return (
     <TextField
       size="small"
-      variant="standard"
-      sx={{ width }}
+      variant={variant}
+      hiddenLabel={filled}
+      sx={fieldSx}
       type={operator.inputType ?? 'text'}
       value={item.value ?? ''}
       onChange={(event) => onChange(event.target.value)}

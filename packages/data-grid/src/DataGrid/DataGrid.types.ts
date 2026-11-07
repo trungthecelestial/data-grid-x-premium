@@ -41,6 +41,9 @@ export type GridRowSelectionModel = readonly GridRowId[];
 
 export type GridColumnVisibilityModel = Record<string, boolean>;
 
+/** Selected cells as `{ [rowId]: { [field]: true } }`. */
+export type GridCellSelectionModel = Record<GridRowId, Record<string, boolean>>;
+
 export type GridDensity = 'compact' | 'standard' | 'comfortable';
 
 export type GridAggregationFunction = 'sum' | 'avg' | 'min' | 'max' | 'size';
@@ -229,6 +232,7 @@ export interface GridLocaleText {
   densityComfortable: string;
   exportCsv: string;
   exportPrint: string;
+  exportExcel: string;
   columnsPanelShowHideAll: string;
   columnsPanelReset: string;
   columnsPanelSearch: string;
@@ -279,6 +283,8 @@ export interface GridToolbarProps<R extends GridValidRowModel = GridValidRowMode
   onDensityChange: (density: GridDensity) => void;
   localeText: GridLocaleText;
   exportDataAsCsv: () => void;
+  /** Omitted when `disableExcelExport` is set. */
+  exportDataAsExcel?: () => void;
   print: () => void;
   /** Hides the "Columns" button. */
   disableColumnSelector?: boolean;
@@ -306,7 +312,7 @@ export interface GridPaginationSlotProps {
   count: number;
   page: number;
   pageSize: number;
-  pageSizeOptions: readonly number[];
+  pageSizeOptions: readonly (number | GridPageSizeOption)[];
   onPaginationModelChange: (model: GridPaginationModel) => void;
   localeText: GridLocaleText;
 }
@@ -369,6 +375,35 @@ export interface GridCsvExportOptions {
   getRowsToExport?: (params: { apiRef: GridApi }) => GridRowId[];
 }
 
+export interface GridExcelExportOptions {
+  fileName?: string;
+  /** Worksheet name. Defaults to `Sheet1`. */
+  sheetName?: string;
+  fields?: string[];
+  allColumns?: boolean;
+  /** Writes a bold, frozen header row. Defaults to true. */
+  includeHeaders?: boolean;
+  getRowsToExport?: (params: { apiRef: GridApi }) => GridRowId[];
+}
+
+/** A page size choice with its own label. A value of `-1` shows every row on one page. */
+export interface GridPageSizeOption {
+  value: number;
+  label: string;
+}
+
+export interface GridRowSpacing {
+  top?: number;
+  bottom?: number;
+}
+
+export interface GridRowSpacingParams<R extends GridValidRowModel = GridValidRowModel> extends GridRowParams<R> {
+  isFirstVisible: boolean;
+  isLastVisible: boolean;
+  /** Index among the rows on the current page. */
+  indexRelativeToCurrentPage: number;
+}
+
 export interface GridPrintExportOptions {
   /** Document title. */
   fileName?: string;
@@ -412,6 +447,10 @@ export interface GridApi {
   exportDataAsCsv: (options?: GridCsvExportOptions) => void;
   getDataAsCsv: (options?: Omit<GridCsvExportOptions, 'fileName'>) => string;
   print: (options?: GridPrintExportOptions) => void;
+  /** Downloads the rows as an .xlsx workbook. */
+  exportDataAsExcel: (options?: GridExcelExportOptions) => void;
+  /** The bytes of the .xlsx workbook, for saving or uploading it yourself. */
+  getDataAsExcel: (options?: Omit<GridExcelExportOptions, 'fileName'>) => Uint8Array;
   startCellEditMode: (params: { id: GridRowId; field: string }) => void;
   startRowEditMode: (params: { id: GridRowId }) => void;
   stopEditMode: (params?: GridEditStopParams) => void;
@@ -420,6 +459,10 @@ export interface GridApi {
   getRowModels: () => Map<GridRowId, GridValidRowModel>;
   /** Moves a row to a position among all rows. Works without `rowReordering`. */
   setRowIndex: (id: GridRowId, targetIndex: number) => void;
+  getCellSelectionModel: () => GridCellSelectionModel;
+  setCellSelectionModel: (model: GridCellSelectionModel) => void;
+  isCellSelected: (id: GridRowId, field: string) => boolean;
+  getSelectedCellsAsArray: () => { id: GridRowId; field: string }[];
 
   getRow: (id: GridRowId) => GridValidRowModel | null;
   getRowId: (row: GridValidRowModel) => GridRowId;
@@ -524,7 +567,8 @@ export interface DataGridProps<R extends GridValidRowModel = GridValidRowModel> 
   paginationMode?: 'client' | 'server';
   /** Total row count when `paginationMode` is `server`. */
   rowCount?: number;
-  pageSizeOptions?: readonly number[];
+  /** Page sizes to offer. Use `{ value: -1, label: 'All' }` for an option that shows every row. */
+  pageSizeOptions?: readonly (number | GridPageSizeOption)[];
   hideFooter?: boolean;
 
   checkboxSelection?: boolean;
@@ -562,6 +606,18 @@ export interface DataGridProps<R extends GridValidRowModel = GridValidRowModel> 
    * Reordering is off while sorting, filtering or grouping is active, since the rows then show in another order.
    */
   rowReordering?: boolean;
+
+  /**
+   * Lets the user select cells: click, Shift+click or drag for a range, Ctrl/Cmd+click to toggle one cell, Shift+Arrow to extend.
+   * Clicking a cell then no longer selects its row. Use the checkbox column for rows.
+   */
+  cellSelection?: boolean;
+  cellSelectionModel?: GridCellSelectionModel;
+  onCellSelectionModelChange?: (model: GridCellSelectionModel) => void;
+  /** Turns off pasting tab separated text into editable cells with Ctrl/Cmd+V. */
+  disableClipboardPaste?: boolean;
+  /** Called with the text the user pasted, before it is applied. */
+  onClipboardPaste?: (text: string) => void;
   /** Called after a row moved. Indexes count every row in the current order, not only the rows on the page. */
   onRowOrderChange?: (params: { row: R; oldIndex: number; targetIndex: number }) => void;
 
@@ -615,6 +671,8 @@ export interface DataGridProps<R extends GridValidRowModel = GridValidRowModel> 
   getRowClassName?: (params: GridRowClassNameParams<R>) => string;
   /** Class name added to each cell. */
   getCellClassName?: (params: GridCellClassNameParams<R>) => string;
+  /** Space in px added above and below a row, for example to separate rows into cards. */
+  getRowSpacing?: (params: GridRowSpacingParams<R>) => GridRowSpacing;
   /** Height of one row in px. Return `null` to use `rowHeight`. */
   getRowHeight?: (params: GridRowParams<R>) => number | null;
   /** Decides per cell whether it can be edited, on top of the column's `editable`. */
@@ -645,6 +703,10 @@ export interface DataGridProps<R extends GridValidRowModel = GridValidRowModel> 
   disableAutosize?: boolean;
   /** Options applied to the toolbar's CSV export. */
   csvOptions?: Omit<GridCsvExportOptions, 'getRowsToExport'>;
+  /** Options applied to the toolbar's Excel export. */
+  excelOptions?: Omit<GridExcelExportOptions, 'getRowsToExport'>;
+  /** Hides the Excel export from the toolbar. The api methods still work. */
+  disableExcelExport?: boolean;
   /** Options applied to the toolbar's print export. */
   printOptions?: GridPrintExportOptions;
 }

@@ -203,6 +203,24 @@ describe('header filters', () => {
     expect(names()).not.toContain('Alan');
   });
 
+  it('keeps filterable columns wide enough for their filter input', () => {
+    const narrow: GridColDef<Person>[] = [
+      { field: 'name', headerName: 'Name', width: 60 },
+      { field: 'age', headerName: 'Age', type: 'number', width: 60, filterable: false },
+      { field: 'team', headerName: 'Team', width: 300 },
+    ];
+    const widthOf = (name: string) => getComputedStyle(screen.getByRole('columnheader', { name })).width;
+
+    const { rerender } = render(<DataGrid rows={people} columns={narrow} />);
+    expect(widthOf('Name')).toBe('60px');
+
+    rerender(<DataGrid rows={people} columns={narrow} headerFilters />);
+    expect(widthOf('Name')).toBe('116px');
+    // Columns that are not filterable, or already wide, keep their size.
+    expect(widthOf('Age')).toBe('60px');
+    expect(widthOf('Team')).toBe('300px');
+  });
+
   it('skips columns that cannot be filtered', () => {
     render(
       <DataGrid

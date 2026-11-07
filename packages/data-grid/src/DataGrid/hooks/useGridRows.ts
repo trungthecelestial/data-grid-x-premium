@@ -126,7 +126,8 @@ export function useGridRows<R extends GridValidRowModel>(params: UseGridRowsPara
     [expansion, defaultExpansionDepth],
   );
 
-  const clientPagination = pagination && paginationMode === 'client';
+  // A page size of -1 (or any value below 1) is the "All" option: one page with every row.
+  const clientPagination = pagination && paginationMode === 'client' && pageSize > 0;
   const lastPage = clientPagination ? Math.max(0, Math.ceil(roots.length / pageSize) - 1) : 0;
   const currentPage = clientPagination ? Math.min(page, lastPage) : page;
 

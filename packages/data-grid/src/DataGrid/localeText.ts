@@ -14,6 +14,7 @@ export const DEFAULT_LOCALE_TEXT: GridLocaleText = {
   densityComfortable: 'Comfortable',
   exportCsv: 'Download as CSV',
   exportPrint: 'Print',
+  exportExcel: 'Download as Excel',
   columnsPanelShowHideAll: 'Show/Hide All',
   columnsPanelReset: 'Reset',
   columnsPanelSearch: 'Search',

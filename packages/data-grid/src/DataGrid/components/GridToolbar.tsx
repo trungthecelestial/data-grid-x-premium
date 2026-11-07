@@ -36,6 +36,7 @@ export function GridToolbar<R extends GridValidRowModel = GridValidRowModel>(pro
     onDensityChange,
     localeText,
     exportDataAsCsv,
+    exportDataAsExcel,
     print,
     disableColumnSelector,
     disableDensitySelector,
@@ -189,6 +190,16 @@ export function GridToolbar<R extends GridValidRowModel = GridValidRowModel>(pro
         >
           {localeText.exportCsv}
         </MenuItem>
+        {exportDataAsExcel && (
+          <MenuItem
+            onClick={() => {
+              exportDataAsExcel();
+              close();
+            }}
+          >
+            {localeText.exportExcel}
+          </MenuItem>
+        )}
         <MenuItem
           onClick={() => {
             print();

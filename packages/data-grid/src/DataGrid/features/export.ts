@@ -59,8 +59,9 @@ export function buildPrintHtml<R extends GridValidRowModel>(
   return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title><style>body{font-family:Roboto,Arial,sans-serif;font-size:14px}table{border-collapse:collapse;width:100%}th,td{border:1px solid #ccc;padding:6px 10px;text-align:left}th{background:#f5f5f5}${pageStyle}</style></head><body><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></body></html>`;
 }
 
-export function downloadFile(fileName: string, content: string, type: string): void {
-  const url = URL.createObjectURL(new Blob([content], { type }));
+export function downloadFile(fileName: string, content: BlobPart | Uint8Array, type: string): void {
+  // A Uint8Array is a valid blob part. Newer typings only accept ones known not to sit on a shared buffer.
+  const url = URL.createObjectURL(new Blob([content as BlobPart], { type }));
   const link = document.createElement('a');
   link.href = url;
   link.download = fileName;

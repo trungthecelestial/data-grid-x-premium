@@ -33,6 +33,7 @@ import {
   type MouseEvent,
   type PointerEvent,
   type ReactNode,
+  type ClipboardEvent,
   type UIEvent,
 } from 'react';
 import { GridCellEditor } from './components/GridCellEditor';
@@ -48,10 +49,12 @@ import type {
   GridApiRef,
   GridAutosizeOptions,
   GridCellParams,
+  GridCellSelectionModel,
   GridColDef,
   GridColumnsPanelSlotProps,
   GridCsvExportOptions,
   GridEditStopReason,
+  GridExcelExportOptions,
   GridEventMap,
   GridEventName,
   GridFilterModel,
@@ -61,6 +64,7 @@ import type {
   GridPinnedColumns,
   GridPrintExportOptions,
   GridRowId,
+  GridRowSpacing,
   GridRowUpdate,
   GridSortDirection,
   GridToolbarProps,
@@ -70,6 +74,7 @@ import { formatAggregate } from './features/aggregation';
 import { computeAutosizeWidths } from './features/autosize';
 import {
   buildGroupHeaderRows,
+  DEFAULT_MIN_WIDTH,
   getCellValue,
   getDefaultAlign,
   getFormattedValue,
@@ -77,7 +82,9 @@ import {
   reconcileOrder,
   resolveColumnWidths,
 } from './features/columns';
+import { parseClipboardText, parsePastedValue, SKIP_PASTE } from './features/clipboard';
 import { buildCsv, buildPrintHtml, downloadFile, printHtml } from './features/export';
+import { buildXlsx, XLSX_MIME_TYPE } from './features/xlsx';
 import { countActiveFilters, getColumnFilterOperators, getInitialFilterValue, isFilterable } from './features/filtering';
 import { applySortClick, DEFAULT_SORTING_ORDER } from './features/sorting';
 import type { GridTreeNode } from './features/tree';
@@ -88,8 +95,12 @@ import { getOffsets, getVirtualRange } from './hooks/virtualization';
 import { DEFAULT_LOCALE_TEXT } from './localeText';
 
 const DEFAULT_PAGE_SIZE_OPTIONS = [10, 25, 50] as const;
+const NO_SPACING: Readonly<Required<GridRowSpacing>> = { top: 0, bottom: 0 };
+const pageSizeValue = (option: number | { value: number }) => (typeof option === 'number' ? option : option.value);
 const DEFAULT_HEIGHT = 400;
 const DEFAULT_DETAIL_HEIGHT = 200;
+/** Operator icon (26px), gap, cell padding and about 66px of input. */
+const HEADER_FILTER_MIN_WIDTH = 116;
 const CHECKBOX_FIELD = '__check__';
 const DETAIL_FIELD = '__detail_panel_toggle__';
 const TREE_GROUP_FIELD = '__tree_data_group__';
@@ -223,6 +234,11 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     columnBuffer = 3,
     headerFilters = false,
     rowReordering = false,
+    cellSelection: cellSelectionEnabled = false,
+    disableClipboardPaste = false,
+    getRowSpacing,
+    excelOptions,
+    disableExcelExport = false,
     scrollEndThreshold = 80,
     csvOptions,
     printOptions,
@@ -242,13 +258,18 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
   );
   const [paginationModel, setPaginationModel] = useGridState<GridPaginationModel>(
     props.paginationModel,
-    initialState?.pagination?.paginationModel ?? { page: 0, pageSize: pageSizeOptions[0] ?? 10 },
+    initialState?.pagination?.paginationModel ?? { page: 0, pageSize: pageSizeValue(pageSizeOptions[0] ?? 10) },
     props.onPaginationModelChange,
   );
   const [selection, setSelection] = useGridState(
     props.rowSelectionModel,
     initialState?.rowSelection ?? EMPTY_ARRAY,
     props.onRowSelectionModelChange,
+  );
+  const [cellSelection, setCellSelection] = useGridState<GridCellSelectionModel>(
+    props.cellSelectionModel,
+    EMPTY_OBJECT as GridCellSelectionModel,
+    props.onCellSelectionModelChange,
   );
   const [visibilityModel, setVisibilityModel] = useGridState(
     props.columnVisibilityModel,
@@ -304,6 +325,8 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
   const lastSelectedRef = useRef<GridRowId | null>(null);
   const dragFieldRef = useRef<string | null>(null);
   const dragRowRef = useRef<GridRowId | null>(null);
+  const cellAnchorRef = useRef<{ row: number; col: number } | null>(null);
+  const draggingCellsRef = useRef(false);
   const pendingFocusRowRef = useRef<GridRowId | null>(null);
   const listenersRef = useRef(new Map<GridEventName, Set<EventListener>>());
   const eventPropsRef = useRef<Partial<Record<GridEventName, EventListener | undefined>>>({});
@@ -672,9 +695,14 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
       return column ? [column] : [];
     });
     const middle = visibleUserColumns.filter((column) => !pinnedLeft.includes(column) && !pinnedRight.includes(column));
-    const all = [...specialColumns, ...pinnedLeft, ...middle, ...pinnedRight];
+    // A header filter needs room for its operator icon and a usable input, so filterable columns keep a minimum width while the row shows.
+    const withFilterRoom = (column: GridColDef<R>): GridColDef<R> =>
+      headerFilters && !disableColumnFilter && isFilterable(column) && (column.minWidth ?? DEFAULT_MIN_WIDTH) < HEADER_FILTER_MIN_WIDTH
+        ? { ...column, minWidth: HEADER_FILTER_MIN_WIDTH }
+        : column;
+    const all = [...specialColumns, ...pinnedLeft.map(withFilterRoom), ...middle.map(withFilterRoom), ...pinnedRight.map(withFilterRoom)];
     return { columns: all, leftCount: specialColumns.length + pinnedLeft.length, rightStart: all.length - pinnedRight.length };
-  }, [specialColumns, visibleUserColumns, pinned]);
+  }, [specialColumns, visibleUserColumns, pinned, headerFilters, disableColumnFilter]);
 
   const widths = useMemo(
     () => resolveColumnWidths(columns, containerWidth, widthOverrides),
@@ -732,10 +760,32 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     [columnGroupingModel, columns],
   );
 
+  const rowSpacings = useMemo(() => {
+    const map = new Map<GridRowId, Readonly<Required<GridRowSpacing>>>();
+    if (getRowSpacing) {
+      const dataNodes = pageNodes.filter((node) => node.row);
+      dataNodes.forEach((node, index) => {
+        const spacing = getRowSpacing({
+          id: node.id,
+          row: node.row as R,
+          indexRelativeToCurrentPage: index,
+          isFirstVisible: index === 0,
+          isLastVisible: index === dataNodes.length - 1,
+        });
+        map.set(node.id, { top: spacing.top ?? 0, bottom: spacing.bottom ?? 0 });
+      });
+    }
+    return map;
+  }, [getRowSpacing, pageNodes]);
+
+  // The height of a row's slot: the row itself plus the space above and below it.
   const rowHeightFor = useCallback(
-    (node: GridTreeNode<R>) =>
-      (node.row && getRowHeight ? getRowHeight({ id: node.id, row: node.row }) : null) ?? rowHeight,
-    [getRowHeight, rowHeight],
+    (node: GridTreeNode<R>) => {
+      const height = (node.row && getRowHeight ? getRowHeight({ id: node.id, row: node.row }) : null) ?? rowHeight;
+      const spacing = rowSpacings.get(node.id) ?? NO_SPACING;
+      return height + spacing.top + spacing.bottom;
+    },
+    [getRowHeight, rowHeight, rowSpacings],
   );
 
   const entries = useMemo(() => {
@@ -810,6 +860,23 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
         'text/csv;charset=utf-8',
       ),
     [getDataAsCsv, csvOptions],
+  );
+  const getDataAsExcel = useCallback(
+    (options?: Omit<GridExcelExportOptions, 'fileName'>) => {
+      const merged = { ...excelOptions, ...options };
+      const { exportedColumns, exportedRows } = resolveExport(merged);
+      return buildXlsx(exportedRows, exportedColumns, {
+        sheetName: merged.sheetName,
+        includeHeaders: merged.includeHeaders,
+        columnWidths: Object.fromEntries(columns.map((column, index) => [column.field, widths[index] ?? 0])),
+      });
+    },
+    [excelOptions, resolveExport, columns, widths],
+  );
+  const exportDataAsExcel = useCallback(
+    (options?: GridExcelExportOptions) =>
+      downloadFile(`${options?.fileName ?? excelOptions?.fileName ?? 'data'}.xlsx`, getDataAsExcel(options), XLSX_MIME_TYPE),
+    [getDataAsExcel, excelOptions],
   );
   const print = useCallback(
     (options?: GridPrintExportOptions) => {
@@ -966,6 +1033,169 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     setFocusPosition({ row: Math.max(0, Math.min(rowEntryIndexes.length - 1, row)), col: Math.max(0, Math.min(columns.length - 1, col)) });
   };
 
+  const selectedCells = useMemo(
+    () =>
+      Object.entries(cellSelection).flatMap(([id, fields]) =>
+        Object.entries(fields).flatMap(([field, selected]) => {
+          const rowId = rowsById.has(id) ? id : rowsById.has(Number(id)) ? Number(id) : id;
+          return selected ? [{ id: rowId as GridRowId, field }] : [];
+        }),
+      ),
+    [cellSelection, rowsById],
+  );
+
+  /** Selects the rectangle of data cells between two positions on the current page. */
+  const selectCellRange = (from: { row: number; col: number }, to: { row: number; col: number }) => {
+    const next: GridCellSelectionModel = {};
+    for (let row = Math.min(from.row, to.row); row <= Math.max(from.row, to.row); row += 1) {
+      const id = pageRowIds[row];
+      if (id === undefined) {
+        continue;
+      }
+      for (let col = Math.min(from.col, to.col); col <= Math.max(from.col, to.col); col += 1) {
+        const column = columns[col];
+        if (column && !SPECIAL_FIELDS.has(column.field)) {
+          (next[id] ??= {})[column.field] = true;
+        }
+      }
+    }
+    setCellSelection(next);
+  };
+
+  const handleCellMouseDown = (event: MouseEvent, id: GridRowId, row: number | null, col: number, field: string) => {
+    if (event.button !== 0 || row === null) {
+      return;
+    }
+    if (event.shiftKey && cellAnchorRef.current) {
+      selectCellRange(cellAnchorRef.current, { row, col });
+      return;
+    }
+    cellAnchorRef.current = { row, col };
+    if (event.ctrlKey || event.metaKey) {
+      const next: GridCellSelectionModel = {};
+      for (const [rowId, fields] of Object.entries(cellSelection)) {
+        next[rowId] = { ...fields };
+      }
+      const current = next[id] ?? {};
+      next[id] = { ...current, [field]: !current[field] };
+      setCellSelection(next);
+      return;
+    }
+    selectCellRange({ row, col }, { row, col });
+    draggingCellsRef.current = true;
+    window.addEventListener(
+      'mouseup',
+      () => {
+        draggingCellsRef.current = false;
+      },
+      { once: true },
+    );
+  };
+
+  const extendCellDrag = (row: number | null, col: number) => {
+    if (draggingCellsRef.current && row !== null && cellAnchorRef.current) {
+      selectCellRange(cellAnchorRef.current, { row, col });
+    }
+  };
+
+  /** Writes pasted text into editable cells, starting at the selection or the focused cell. */
+  const pasteText = async (text: string) => {
+    const grid = parseClipboardText(text);
+    if (grid.length === 0) {
+      return;
+    }
+    const dataColumns = columns.filter((column) => !SPECIAL_FIELDS.has(column.field));
+    const rowPosition = new Map(filteredRows.map((row, index) => [getRowId(row), index]));
+    const targets: { id: GridRowId; field: string; text: string }[] = [];
+
+    const single = grid.length === 1 && grid[0]?.length === 1;
+    if (single && selectedCells.length > 1) {
+      for (const cell of selectedCells) {
+        targets.push({ ...cell, text: grid[0]?.[0] ?? '' });
+      }
+    } else {
+      let startRow: number | undefined;
+      let startField: string | undefined;
+      if (selectedCells.length > 0) {
+        startRow = Math.min(...selectedCells.map((cell) => rowPosition.get(cell.id) ?? Infinity));
+        startField = dataColumns.find((column) => selectedCells.some((cell) => cell.field === column.field))?.field;
+      } else if (focusPosition) {
+        const id = pageRowIds[focusPosition.row];
+        startRow = id === undefined ? undefined : rowPosition.get(id);
+        startField = columns[focusPosition.col]?.field;
+      }
+      const startCol = dataColumns.findIndex((column) => column.field === startField);
+      if (startRow === undefined || !Number.isFinite(startRow) || startCol === -1) {
+        return;
+      }
+      grid.forEach((cells, rowOffset) => {
+        const row = filteredRows[startRow + rowOffset];
+        cells.forEach((cellText, colOffset) => {
+          const column = dataColumns[startCol + colOffset];
+          if (row && column) {
+            targets.push({ id: getRowId(row), field: column.field, text: cellText });
+          }
+        });
+      });
+    }
+
+    const byRow = new Map<GridRowId, { field: string; text: string }[]>();
+    for (const { id, field, text: cellText } of targets) {
+      byRow.set(id, [...(byRow.get(id) ?? []), { field, text: cellText }]);
+    }
+    const results = new Map<GridRowId, R>();
+    for (const [id, cells] of byRow) {
+      const oldRow = rowsById.get(id);
+      if (!oldRow) {
+        continue;
+      }
+      let newRow = oldRow;
+      for (const { field, text: cellText } of cells) {
+        const column = userColumnMap.get(field);
+        if (!column || !canEditCell(id, oldRow, column)) {
+          continue;
+        }
+        const value = parsePastedValue(column, cellText, newRow);
+        if (value === SKIP_PASTE) {
+          continue;
+        }
+        newRow = column.valueSetter ? column.valueSetter(value, newRow) : { ...newRow, [field]: value };
+      }
+      if (Object.keys({ ...oldRow, ...newRow }).some((key) => oldRow[key] !== newRow[key])) {
+        try {
+          results.set(id, processRowUpdate ? await processRowUpdate(newRow, oldRow) : newRow);
+        } catch (error) {
+          onProcessRowUpdateError?.(error);
+        }
+      }
+    }
+    if (results.size > 0) {
+      setRowUpdates((previous) => {
+        const base: RowUpdates<R> =
+          previous.source === rows ? previous : { source: rows, map: EMPTY_MAP, added: EMPTY_ARRAY, deleted: EMPTY_SET };
+        const map = new Map(base.map);
+        for (const [id, row] of results) {
+          map.set(id, row);
+        }
+        return { ...base, map };
+      });
+    }
+  };
+
+  const handlePaste = (event: ClipboardEvent) => {
+    const target = event.target as HTMLElement;
+    if (disableClipboardPaste || editing || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) {
+      return;
+    }
+    const text = event.clipboardData.getData('text/plain');
+    if (!text) {
+      return;
+    }
+    event.preventDefault();
+    props.onClipboardPaste?.(text);
+    void pasteText(text);
+  };
+
   const pin = (field: string, side: 'left' | 'right' | null) => {
     const left = (pinned.left ?? []).filter((item) => item !== field);
     const right = (pinned.right ?? []).filter((item) => item !== field);
@@ -1019,6 +1249,8 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     exportDataAsCsv,
     getDataAsCsv,
     print,
+    exportDataAsExcel,
+    getDataAsExcel,
     startCellEditMode: ({ id, field }) => startCellEdit(id, field),
     startRowEditMode: ({ id }) => startRowEdit(id),
     stopEditMode: (options) => void stopEdit(options),
@@ -1026,6 +1258,10 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     setColumnVisibility: (field, visible) => setVisibilityModel({ ...visibilityModel, [field]: visible }),
     getRowModels: () => rowsById,
     setRowIndex: moveRow,
+    getCellSelectionModel: () => cellSelection,
+    setCellSelectionModel: setCellSelection,
+    isCellSelected: (id, field) => Boolean(cellSelection[id]?.[field]),
+    getSelectedCellsAsArray: () => selectedCells,
 
     getRow: (id) => rowsById.get(id) ?? null,
     getRowId: (row) => getRowId(row as R),
@@ -1326,7 +1562,7 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     if (node.row) {
       emit('rowClick', { id: node.id, row: node.row }, event);
     }
-    if (!rowSelection || disableRowSelectionOnClick || !isSelectable(node.id, node.row) || editing) {
+    if (!rowSelection || disableRowSelectionOnClick || cellSelectionEnabled || !isSelectable(node.id, node.row) || editing) {
       return;
     }
     if (event.shiftKey && lastSelectedRef.current !== null) {
@@ -1365,6 +1601,21 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
       emit('cellKeyDown', getCellParams(entry.node.id, entry.node.row, column), event);
     }
 
+    const arrowStep: Record<string, [number, number]> = { ArrowDown: [1, 0], ArrowUp: [-1, 0], ArrowRight: [0, 1], ArrowLeft: [0, -1] };
+    const step = arrowStep[event.key];
+    if (cellSelectionEnabled && event.shiftKey && step) {
+      const anchor = cellAnchorRef.current ?? { row, col };
+      cellAnchorRef.current = anchor;
+      const target = {
+        row: Math.max(0, Math.min(rowEntryIndexes.length - 1, row + step[0])),
+        col: Math.max(0, Math.min(columns.length - 1, col + step[1])),
+      };
+      selectCellRange(anchor, target);
+      focusCell(target.row, target.col);
+      event.preventDefault();
+      return;
+    }
+
     switch (event.key) {
       case 'ArrowDown':
         focusCell(row + 1, col);
@@ -1401,7 +1652,15 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
           return;
         }
         let text: string | null = null;
-        if (selection.length > 0) {
+        if (cellSelectionEnabled && selectedCells.length > 0) {
+          const selectedFields = new Set(selectedCells.map((cell) => cell.field));
+          const selectedIds = new Set(selectedCells.map((cell) => cell.id));
+          text = buildCsv(
+            filteredRows.filter((row) => selectedIds.has(getRowId(row))),
+            columns.filter((candidate) => selectedFields.has(candidate.field)),
+            { delimiter: '\t', includeHeaders: false, raw: ignoreValueFormatterDuringExport },
+          );
+        } else if (selection.length > 0) {
           text = buildCsv(
             filteredRows.filter((row) => selectedSet.has(getRowId(row))),
             exportColumns,
@@ -1628,6 +1887,9 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
         }
         sx={{
           height: rowHeightFor(node),
+          boxSizing: 'border-box',
+          paddingTop: `${rowSpacings.get(node.id)?.top ?? 0}px`,
+          paddingBottom: `${rowSpacings.get(node.id)?.bottom ?? 0}px`,
           width: totalWidth,
           ...(dropTarget?.id === node.id && {
             boxShadow: (theme: Theme) => `inset 0 ${dropTarget.after ? -2 : 2}px 0 ${theme.palette.primary.main}`,
@@ -1637,6 +1899,8 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
       >
         {renderColumns((column, index) => {
           const editingCell = edit !== null && column.field in edit.values && isEditable(column, node);
+          const selectedCell = cellSelectionEnabled && Boolean(cellSelection[node.id]?.[column.field]);
+          const selectable = cellSelectionEnabled && rowIndex !== null && !SPECIAL_FIELDS.has(column.field) && !editingCell;
           const focused =
             rowIndex !== null &&
             (focusPosition ? focusPosition.row === rowIndex && focusPosition.col === index : rowIndex === 0 && index === 0);
@@ -1649,6 +1913,9 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
               data-colindex={index}
               aria-colindex={index + 1}
               className={node.row && getCellClassName && !SPECIAL_FIELDS.has(column.field) ? getCellClassName(getCellParams(node.id, row, column)) : undefined}
+              aria-selected={cellSelectionEnabled && !SPECIAL_FIELDS.has(column.field) ? selectedCell : undefined}
+              onMouseDown={selectable ? (event) => handleCellMouseDown(event, node.id, rowIndex, index, column.field) : undefined}
+              onMouseEnter={selectable ? () => extendCellDrag(rowIndex, index) : undefined}
               tabIndex={rowIndex !== null && focused && !editingCell ? 0 : -1}
               onClick={(event) => {
                 if (rowIndex !== null) {
@@ -1658,7 +1925,16 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
                   emit('cellClick', getCellParams(node.id, node.row, column), event);
                 }
               }}
-              sx={{ ...cellSx(index, false), outlineOffset: -2, '&:focus-visible': { outline: '2px solid', outlineColor: 'primary.main' } }}
+              sx={{
+                ...cellSx(index, false),
+                outlineOffset: -2,
+                '&:focus-visible': { outline: '2px solid', outlineColor: 'primary.main' },
+                ...(cellSelectionEnabled && { userSelect: 'none' }),
+                // A gradient over the cell's own background, so pinned cells stay opaque.
+                ...(selectedCell && {
+                  backgroundImage: (theme: Theme) => `linear-gradient(${alpha(theme.palette.primary.main, 0.18)}, ${alpha(theme.palette.primary.main, 0.18)})`,
+                }),
+              }}
             >
               {editingCell && edit ? renderEditor(column, node, row, edit) : renderValue(column, node, row)}
             </TableCell>
@@ -1829,6 +2105,7 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     onDensityChange: setDensity,
     localeText,
     exportDataAsCsv: () => exportDataAsCsv(),
+    exportDataAsExcel: disableExcelExport ? undefined : () => exportDataAsExcel(),
     print: () => print(),
     disableColumnSelector,
     disableDensitySelector,
@@ -1893,6 +2170,7 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
         ref={scrollerRef}
         onScroll={handleScroll}
         onKeyDown={handleKeyDown}
+        onPaste={handlePaste}
         sx={{ height: autoHeight ? 'auto' : height, position: 'relative', overflow: 'auto' }}
       >
         <Table

@@ -68,6 +68,7 @@ export function GridHeaderFilterCell<R extends GridValidRowModel>(props: GridHea
         ) : (
           <FilterValueInput
             fullWidth
+            variant="filled"
             column={column}
             operator={operator}
             item={current}
