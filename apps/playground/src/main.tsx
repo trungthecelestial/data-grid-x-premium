@@ -110,6 +110,26 @@ function WideColumns() {
   return <DataGrid rows={wideRows} columns={wideColumns} pagination={false} height={420} headerFilters initialState={{ pinnedColumns: { left: ['col0'] } }} />;
 }
 
+const reorderRows = employees.slice(0, 12);
+
+function RowReordering() {
+  return (
+    <>
+      <Typography variant="body2" sx={{ mb: 1 }}>
+        Drag a handle, or press Alt+Arrow on it. Sorting and filtering switch reordering off.
+      </Typography>
+      <DataGrid
+        rows={reorderRows}
+        columns={columns.slice(0, 4)}
+        rowReordering
+        onRowOrderChange={({ row, targetIndex }) => console.log('moved', row.name, 'to', targetIndex)}
+        pagination={false}
+        height={520}
+      />
+    </>
+  );
+}
+
 const fileRows = [
   { id: 1, path: ['src'], size: 0 },
   { id: 2, path: ['src', 'index.ts'], size: 1200 },
@@ -173,6 +193,7 @@ const TABS = [
   { label: 'Overview', element: <Overview /> },
   { label: 'Virtualized (1000 rows)', element: <Virtualized /> },
   { label: 'Wide (60 columns)', element: <WideColumns /> },
+  { label: 'Row reordering', element: <RowReordering /> },
   { label: 'Tree data', element: <TreeData /> },
   { label: 'Row grouping', element: <RowGrouping /> },
   { label: 'Master-detail', element: <MasterDetail /> },

@@ -262,6 +262,7 @@ export interface GridLocaleText {
   columnMenuUngroupBy: (columnName: string) => string;
   columnMenuHideColumn: string;
   columnMenuManageColumns: string;
+  rowReorderHandle: string;
   columnMenuPinLeft: string;
   columnMenuPinRight: string;
   columnMenuUnpin: string;
@@ -417,6 +418,8 @@ export interface GridApi {
   setRowSelectionModel: (model: GridRowSelectionModel) => void;
   setColumnVisibility: (field: string, visible: boolean) => void;
   getRowModels: () => Map<GridRowId, GridValidRowModel>;
+  /** Moves a row to a position among all rows. Works without `rowReordering`. */
+  setRowIndex: (id: GridRowId, targetIndex: number) => void;
 
   getRow: (id: GridRowId) => GridValidRowModel | null;
   getRowId: (row: GridValidRowModel) => GridRowId;
@@ -553,6 +556,14 @@ export interface DataGridProps<R extends GridValidRowModel = GridValidRowModel> 
   columnBuffer?: number;
   /** Shows a filter row under the column headers. Each cell edits the filter item of its column. */
   headerFilters?: boolean;
+
+  /**
+   * Adds a drag handle column so rows can be dragged into a new position, or moved with Alt+Arrow keys from the handle.
+   * Reordering is off while sorting, filtering or grouping is active, since the rows then show in another order.
+   */
+  rowReordering?: boolean;
+  /** Called after a row moved. Indexes count every row in the current order, not only the rows on the page. */
+  onRowOrderChange?: (params: { row: R; oldIndex: number; targetIndex: number }) => void;
 
   editMode?: 'cell' | 'row';
   /** Called with the edited row before it is committed. Return the row to keep, or throw to reject. */

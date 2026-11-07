@@ -2,6 +2,7 @@ import CheckIcon from '@mui/icons-material/Check';
 import CloseIcon from '@mui/icons-material/Close';
 import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown';
 import KeyboardArrowRightIcon from '@mui/icons-material/KeyboardArrowRight';
+import DragIndicatorIcon from '@mui/icons-material/DragIndicator';
 import MoreVertIcon from '@mui/icons-material/MoreVert';
 import Box from '@mui/material/Box';
 import Checkbox from '@mui/material/Checkbox';
@@ -77,7 +78,7 @@ import {
   resolveColumnWidths,
 } from './features/columns';
 import { buildCsv, buildPrintHtml, downloadFile, printHtml } from './features/export';
-import { getColumnFilterOperators, getInitialFilterValue, isFilterable } from './features/filtering';
+import { countActiveFilters, getColumnFilterOperators, getInitialFilterValue, isFilterable } from './features/filtering';
 import { applySortClick, DEFAULT_SORTING_ORDER } from './features/sorting';
 import type { GridTreeNode } from './features/tree';
 import { useElementSize } from './hooks/useElementSize';
@@ -93,7 +94,8 @@ const CHECKBOX_FIELD = '__check__';
 const DETAIL_FIELD = '__detail_panel_toggle__';
 const TREE_GROUP_FIELD = '__tree_data_group__';
 const ROW_GROUP_FIELD = '__row_group_by_columns_group__';
-const SPECIAL_FIELDS = new Set([CHECKBOX_FIELD, DETAIL_FIELD, TREE_GROUP_FIELD, ROW_GROUP_FIELD]);
+const REORDER_FIELD = '__reorder__';
+const SPECIAL_FIELDS = new Set([REORDER_FIELD, CHECKBOX_FIELD, DETAIL_FIELD, TREE_GROUP_FIELD, ROW_GROUP_FIELD]);
 
 const DENSITY_HEIGHTS = {
   compact: { row: 36, header: 40 },
@@ -220,6 +222,7 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     disableColumnVirtualization = false,
     columnBuffer = 3,
     headerFilters = false,
+    rowReordering = false,
     scrollEndThreshold = 80,
     csvOptions,
     printOptions,
@@ -286,6 +289,8 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     added: EMPTY_ARRAY,
     deleted: EMPTY_SET,
   });
+  const [rowOrder, setRowOrder] = useState<{ source: readonly R[]; ids: readonly GridRowId[] } | null>(null);
+  const [dropTarget, setDropTarget] = useState<{ id: GridRowId; after: boolean } | null>(null);
   const [editing, setEditing] = useState<EditState | null>(null);
   const [focusPosition, setFocusPosition] = useState<{ row: number; col: number } | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
@@ -298,6 +303,8 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
   const shouldFocusRef = useRef(false);
   const lastSelectedRef = useRef<GridRowId | null>(null);
   const dragFieldRef = useRef<string | null>(null);
+  const dragRowRef = useRef<GridRowId | null>(null);
+  const pendingFocusRowRef = useRef<GridRowId | null>(null);
   const listenersRef = useRef(new Map<GridEventName, Set<EventListener>>());
   const eventPropsRef = useRef<Partial<Record<GridEventName, EventListener | undefined>>>({});
   eventPropsRef.current = {
@@ -328,21 +335,52 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
   const headerHeight = props.columnHeaderHeight ?? heights.header;
 
   const mergedRows = useMemo(() => {
-    if (rowUpdates.source !== rows) {
-      return rows;
+    let result: readonly R[] = rows;
+    if (rowUpdates.source === rows) {
+      const { map, added, deleted } = rowUpdates;
+      if (map.size > 0 || added.length > 0 || deleted.size > 0) {
+        const all = added.length > 0 ? [...rows, ...added] : rows;
+        result = all.flatMap((row) => {
+          const id = getRowId(row);
+          return deleted.has(id) ? [] : [map.get(id) ?? row];
+        });
+      }
     }
-    const { map, added, deleted } = rowUpdates;
-    if (map.size === 0 && added.length === 0 && deleted.size === 0) {
-      return rows;
+    if (rowOrder && rowOrder.source === rows) {
+      // Rows the order does not know, such as ones added later, keep their place after the ordered ones.
+      const position = new Map(rowOrder.ids.map((id, index) => [id, index]));
+      result = [...result].sort((a, b) => (position.get(getRowId(a)) ?? Infinity) - (position.get(getRowId(b)) ?? Infinity) || 0);
     }
-    const all = added.length > 0 ? [...rows, ...added] : rows;
-    return all.flatMap((row) => {
-      const id = getRowId(row);
-      return deleted.has(id) ? [] : [map.get(id) ?? row];
-    });
-  }, [rows, rowUpdates, getRowId]);
+    return result;
+  }, [rows, rowUpdates, rowOrder, getRowId]);
 
   const rowsById = useMemo(() => new Map(mergedRows.map((row) => [getRowId(row), row])), [mergedRows, getRowId]);
+
+  const canReorder =
+    rowReordering &&
+    sortModel.length === 0 &&
+    countActiveFilters(filterModel) === 0 &&
+    !treeData &&
+    rowGroupingModel.length === 0 &&
+    paginationMode === 'client';
+
+  const moveRow = useCallback(
+    (id: GridRowId, targetIndex: number) => {
+      const ids = mergedRows.map(getRowId);
+      const oldIndex = ids.indexOf(id);
+      const newIndex = Math.max(0, Math.min(ids.length - 1, targetIndex));
+      const row = rowsById.get(id);
+      if (oldIndex === -1 || oldIndex === newIndex || !row) {
+        return;
+      }
+      const next = [...ids];
+      next.splice(oldIndex, 1);
+      next.splice(newIndex, 0, id);
+      setRowOrder({ source: rows, ids: next });
+      props.onRowOrderChange?.({ row, oldIndex, targetIndex: newIndex });
+    },
+    [mergedRows, getRowId, rowsById, rows, props.onRowOrderChange],
+  );
 
   const userColumnMap = useMemo(
     () => new Map<string, GridColDef<R>>(userColumns.map((column) => [column.field, column])),
@@ -436,6 +474,55 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
 
   const specialColumns = useMemo<GridColDef<R>[]>(() => {
     const result: GridColDef<R>[] = [];
+
+    if (rowReordering) {
+      result.push({
+        field: REORDER_FIELD,
+        width: 52,
+        sortable: false,
+        filterable: false,
+        hideable: false,
+        resizable: false,
+        disableReorder: true,
+        align: 'center',
+        renderHeader: () => null,
+        renderCell: ({ id }) => (
+          <IconButton
+            size="small"
+            tabIndex={-1}
+            disabled={!canReorder}
+            draggable={canReorder}
+            aria-label={localeText.rowReorderHandle}
+            onClick={(event) => event.stopPropagation()}
+            onDragStart={(event) => {
+              dragRowRef.current = id;
+              event.dataTransfer.effectAllowed = 'move';
+              event.dataTransfer.setData('text/plain', String(id));
+              const rowElement = event.currentTarget.closest('tr');
+              if (rowElement) {
+                event.dataTransfer.setDragImage(rowElement, 0, 0);
+              }
+            }}
+            onDragEnd={() => {
+              dragRowRef.current = null;
+              setDropTarget(null);
+            }}
+            onKeyDown={(event) => {
+              const step = event.key === 'ArrowUp' ? -1 : event.key === 'ArrowDown' ? 1 : 0;
+              if (event.altKey && step !== 0 && canReorder) {
+                event.preventDefault();
+                event.stopPropagation();
+                pendingFocusRowRef.current = id;
+                moveRow(id, mergedRows.findIndex((row) => getRowId(row) === id) + step);
+              }
+            }}
+            sx={{ cursor: canReorder ? 'grab' : 'default', '&:active': { cursor: 'grabbing' } }}
+          >
+            <DragIndicatorIcon fontSize="small" />
+          </IconButton>
+        ),
+      });
+    }
 
     if (checkboxSelection) {
       const selectedCount = selectableIds.filter((id) => selectedSet.has(id)).length;
@@ -551,6 +638,11 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
 
     return result;
   }, [
+    rowReordering,
+    canReorder,
+    moveRow,
+    mergedRows,
+    getRowId,
     checkboxSelection,
     selectableIds,
     selectedSet,
@@ -933,6 +1025,7 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     setRowSelectionModel: setSelection,
     setColumnVisibility: (field, visible) => setVisibilityModel({ ...visibilityModel, [field]: visible }),
     getRowModels: () => rowsById,
+    setRowIndex: moveRow,
 
     getRow: (id) => rowsById.get(id) ?? null,
     getRowId: (row) => getRowId(row as R),
@@ -1193,6 +1286,20 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     setColumnOrder(next);
     props.onColumnOrderChange?.(next);
   };
+
+  // After an Alt+Arrow move the row sits elsewhere, so put the grid focus back on it.
+  useEffect(() => {
+    const id = pendingFocusRowRef.current;
+    if (id === null) {
+      return;
+    }
+    pendingFocusRowRef.current = null;
+    const row = pageRowIds.indexOf(id);
+    const col = columns.findIndex((column) => column.field === REORDER_FIELD);
+    if (row !== -1 && col !== -1) {
+      focusCell(row, col);
+    }
+  });
 
   const handleScroll = (event: UIEvent<HTMLDivElement>) => {
     const element = event.currentTarget;
@@ -1490,7 +1597,43 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
             }
           }
         }}
-        sx={{ height: rowHeightFor(node), width: totalWidth, ...extraSx }}
+        onDragOver={
+          node.row
+            ? (event) => {
+                const dragged = dragRowRef.current;
+                if (dragged === null || dragged === node.id) {
+                  return;
+                }
+                event.preventDefault();
+                const bounds = event.currentTarget.getBoundingClientRect();
+                const ids = mergedRows.map(getRowId);
+                // Dropping on the lower half of a row moves the dragged row below it, unless that would not move it at all.
+                const after = event.clientY > bounds.top + bounds.height / 2 && ids.indexOf(dragged) < ids.indexOf(node.id);
+                setDropTarget((previous) => (previous?.id === node.id && previous.after === after ? previous : { id: node.id, after }));
+              }
+            : undefined
+        }
+        onDrop={
+          node.row
+            ? (event) => {
+                event.preventDefault();
+                const dragged = dragRowRef.current;
+                dragRowRef.current = null;
+                setDropTarget(null);
+                if (dragged !== null && dragged !== node.id) {
+                  moveRow(dragged, mergedRows.findIndex((row) => getRowId(row) === node.id));
+                }
+              }
+            : undefined
+        }
+        sx={{
+          height: rowHeightFor(node),
+          width: totalWidth,
+          ...(dropTarget?.id === node.id && {
+            boxShadow: (theme: Theme) => `inset 0 ${dropTarget.after ? -2 : 2}px 0 ${theme.palette.primary.main}`,
+          }),
+          ...extraSx,
+        }}
       >
         {renderColumns((column, index) => {
           const editingCell = edit !== null && column.field in edit.values && isEditable(column, node);
