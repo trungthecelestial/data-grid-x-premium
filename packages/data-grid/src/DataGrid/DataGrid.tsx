@@ -38,6 +38,7 @@ import { GridCellEditor } from './components/GridCellEditor';
 import { GridColumnMenu, getAvailableAggregationFunctions } from './components/GridColumnMenu';
 import { GridColumnsPanel } from './components/GridColumnsPanel';
 import { GridFilterPanel } from './components/GridFilterPanel';
+import { GridHeaderFilterCell } from './components/GridHeaderFilterCell';
 import { GridToolbar } from './components/GridToolbar';
 import type {
   DataGridProps,
@@ -215,6 +216,10 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     ignoreValueFormatterDuringExport = false,
     disableClipboardCopy = false,
     disableAutosize = false,
+    disableColumnPinning = false,
+    disableColumnVirtualization = false,
+    columnBuffer = 3,
+    headerFilters = false,
     scrollEndThreshold = 80,
     csvOptions,
     printOptions,
@@ -284,6 +289,7 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
   const [editing, setEditing] = useState<EditState | null>(null);
   const [focusPosition, setFocusPosition] = useState<{ row: number; col: number } | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
+  const [scrollLeft, setScrollLeft] = useState(0);
 
   const scrollerRef = useRef<HTMLDivElement>(null);
   const editingRef = useRef(editing);
@@ -604,6 +610,26 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     }
     return result;
   }, [widths, rightStart]);
+
+  // Columns scrolled out of view are not rendered. Pinned columns always are, and spacers stand in for the skipped middle columns.
+  const colWindow = useMemo(() => {
+    if (disableVirtualization || disableColumnVirtualization || containerWidth === 0 || rightStart <= leftCount) {
+      return { start: leftCount, end: rightStart, leftSpacer: 0, rightSpacer: 0 };
+    }
+    const pinnedLeftWidth = widths.slice(0, leftCount).reduce((total, width) => total + width, 0);
+    const range = getVirtualRange(
+      getOffsets(widths.slice(leftCount, rightStart)),
+      Math.max(0, scrollLeft - pinnedLeftWidth),
+      containerWidth,
+      columnBuffer,
+    );
+    return {
+      start: leftCount + range.start,
+      end: leftCount + range.end,
+      leftSpacer: range.offsetTop,
+      rightSpacer: range.offsetBottom,
+    };
+  }, [disableVirtualization, disableColumnVirtualization, containerWidth, widths, leftCount, rightStart, scrollLeft, columnBuffer]);
 
   const groupHeaderRows = useMemo(
     () =>
@@ -1130,6 +1156,8 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
         }
         onHide={column.hideable === false ? undefined : () => setVisibilityModel({ ...visibilityModel, [field]: false })}
         onManageColumns={() => setMenuPanel({ kind: 'columns', anchor: headerCellOf(anchor) })}
+        pinned={pinned.left?.includes(field) ? 'left' : pinned.right?.includes(field) ? 'right' : null}
+        onPin={disableColumnPinning || column.pinnable === false ? undefined : (side) => pin(field, side)}
       />
     );
   };
@@ -1171,6 +1199,7 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     if (virtualize) {
       setScrollTop(element.scrollTop);
     }
+    setScrollLeft(element.scrollLeft);
     const atEnd = element.scrollHeight > 0 && element.scrollTop + element.clientHeight >= element.scrollHeight - scrollEndThreshold;
     if (atEnd && !atScrollEndRef.current) {
       emit('rowsScrollEnd', {
@@ -1304,13 +1333,55 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     if (element) {
       shouldFocusRef.current = false;
       element.focus({ preventScroll: false });
-    } else if (scroller && virtualize) {
-      const entryIndex = rowEntryIndexes[focusPosition.row];
-      if (entryIndex !== undefined) {
-        scroller.scrollTop = offsets[entryIndex] ?? 0;
+    } else if (scroller) {
+      if (virtualize) {
+        const entryIndex = rowEntryIndexes[focusPosition.row];
+        if (entryIndex !== undefined) {
+          scroller.scrollTop = offsets[entryIndex] ?? 0;
+        }
+      }
+      const { col } = focusPosition;
+      if (col >= leftCount && col < rightStart && (col < colWindow.start || col >= colWindow.end)) {
+        const before = (count: number) => widths.slice(0, count).reduce((total, width) => total + width, 0);
+        scroller.scrollLeft = before(col) - before(leftCount);
       }
     }
-  }, [focusPosition, range.start, range.end, rowEntryIndexes, offsets, virtualize]);
+  }, [focusPosition, range.start, range.end, rowEntryIndexes, offsets, virtualize, colWindow, widths, leftCount, rightStart]);
+
+  /** Renders the cells of one row, leaving out columns scrolled out of view. */
+  const renderColumns = (render: (column: GridColDef<R>, index: number) => ReactNode): ReactNode[] => {
+    const out: ReactNode[] = [];
+    const spacer = (key: string, width: number) => (
+      <TableCell
+        key={key}
+        role="presentation"
+        aria-hidden
+        sx={{ width, minWidth: width, maxWidth: width, flex: '0 0 auto', height: '100%', p: 0, border: 0 }}
+      />
+    );
+    const push = (index: number) => {
+      const column = columns[index];
+      if (column) {
+        out.push(render(column, index));
+      }
+    };
+    for (let index = 0; index < leftCount; index += 1) {
+      push(index);
+    }
+    if (colWindow.leftSpacer > 0) {
+      out.push(spacer('__spacer-left', colWindow.leftSpacer));
+    }
+    for (let index = colWindow.start; index < colWindow.end; index += 1) {
+      push(index);
+    }
+    if (colWindow.rightSpacer > 0) {
+      out.push(spacer('__spacer-right', colWindow.rightSpacer));
+    }
+    for (let index = rightStart; index < columns.length; index += 1) {
+      push(index);
+    }
+    return out;
+  };
 
   const cellSx = (index: number, header: boolean) => {
     const column = columns[index] as GridColDef<R>;
@@ -1421,7 +1492,7 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
         }}
         sx={{ height: rowHeightFor(node), width: totalWidth, ...extraSx }}
       >
-        {columns.map((column, index) => {
+        {renderColumns((column, index) => {
           const editingCell = edit !== null && column.field in edit.values && isEditable(column, node);
           const focused =
             rowIndex !== null &&
@@ -1572,11 +1643,38 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     );
   };
 
+  const renderHeaderFilterCell = (column: GridColDef<R>, index: number) => {
+    const item = filterModel.items.find((candidate) => candidate.field === column.field);
+    const filterable = !disableColumnFilter && isFilterable(column) && !SPECIAL_FIELDS.has(column.field);
+    return (
+      <TableCell key={column.field} role="columnheader" aria-colindex={index + 1} sx={{ ...cellSx(index, true), overflow: 'visible' }}>
+        {filterable && (
+          <GridHeaderFilterCell
+            column={column}
+            item={item}
+            localeText={localeText}
+            onChange={(next) =>
+              setFilterModel({
+                ...filterModel,
+                items:
+                  next === null
+                    ? filterModel.items.filter((candidate) => candidate !== item)
+                    : item
+                      ? filterModel.items.map((candidate) => (candidate === item ? next : candidate))
+                      : [...filterModel.items, next],
+              })
+            }
+          />
+        )}
+      </TableCell>
+    );
+  };
+
   const getPinnedRowNode = (row: R): GridTreeNode<R> => ({ id: getRowId(row), depth: 0, row, label: '', children: [], rowCount: 1 });
 
   const visibleEntries = entries.slice(range.start, range.end);
   const spacerSx = { display: 'block', width: totalWidth, borderBottom: 0, p: 0 } as const;
-  const headerRowCount = groupHeaderRows.length + 1;
+  const headerRowCount = groupHeaderRows.length + 1 + (headerFilters ? 1 : 0);
   const totalRowCount = rootCount;
   const toolbarProps = {
     columns: userColumns,
@@ -1687,9 +1785,14 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
                 })}
               </TableRow>
             ))}
-            <TableRow aria-rowindex={headerRowCount} sx={{ height: headerHeight }}>
-              {columns.map(renderHeaderCell)}
+            <TableRow aria-rowindex={groupHeaderRows.length + 1} sx={{ height: headerHeight }}>
+              {renderColumns(renderHeaderCell)}
             </TableRow>
+            {headerFilters && (
+              <TableRow aria-rowindex={headerRowCount} sx={{ height: headerHeight }}>
+                {renderColumns(renderHeaderFilterCell)}
+              </TableRow>
+            )}
           </TableHead>
 
           {topRows.length > 0 && (
@@ -1736,7 +1839,7 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
               {bottomRows.map((row, index) => renderRow(getPinnedRowNode(row), null, headerRowCount + topRows.length + totalRowCount + index + 1))}
               {hasFooterAggregates && footerAggregates && (
                 <TableRow role="row" sx={{ height: rowHeight, width: totalWidth }}>
-                  {columns.map((column, index) => {
+                  {renderColumns((column, index) => {
                     const fn = aggregationModel[column.field];
                     return (
                       <TableCell key={column.field} role="gridcell" sx={{ ...cellSx(index, false), fontWeight: 500, color: 'primary.main' }}>

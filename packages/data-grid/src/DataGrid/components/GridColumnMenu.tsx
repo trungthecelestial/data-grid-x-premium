@@ -1,7 +1,10 @@
 import ArrowDownwardIcon from '@mui/icons-material/ArrowDownward';
 import ArrowUpwardIcon from '@mui/icons-material/ArrowUpward';
 import FilterAltIcon from '@mui/icons-material/FilterAlt';
+import FirstPageIcon from '@mui/icons-material/FirstPage';
 import FunctionsIcon from '@mui/icons-material/Functions';
+import LastPageIcon from '@mui/icons-material/LastPage';
+import PushPinOutlinedIcon from '@mui/icons-material/PushPinOutlined';
 import ViewWeekIcon from '@mui/icons-material/ViewWeek';
 import VisibilityOffIcon from '@mui/icons-material/VisibilityOff';
 import WorkspacesIcon from '@mui/icons-material/Workspaces';
@@ -41,6 +44,10 @@ export interface GridColumnMenuProps<R extends GridValidRowModel> {
   onUngroup?: (field: string) => void;
   onHide?: () => void;
   onManageColumns?: () => void;
+  /** Side the column is pinned to. */
+  pinned?: 'left' | 'right' | null;
+  /** Omit to leave the pin actions out of the menu. */
+  onPin?: (side: 'left' | 'right' | null) => void;
 }
 
 /** Aggregation functions that make sense for a column type. */
@@ -76,6 +83,8 @@ export function GridColumnMenu<R extends GridValidRowModel>(props: GridColumnMen
     onUngroup,
     onHide,
     onManageColumns,
+    pinned = null,
+    onPin,
   } = props;
 
   const name = column.headerName ?? column.field;
@@ -157,6 +166,16 @@ export function GridColumnMenu<R extends GridValidRowModel>(props: GridColumnMen
         ),
       ),
     );
+  }
+  if (onPin) {
+    const pinItems = [
+      item('pin-left', localeText.columnMenuPinLeft, <FirstPageIcon fontSize="small" />, () => onPin('left'), pinned === 'left'),
+      item('pin-right', localeText.columnMenuPinRight, <LastPageIcon fontSize="small" />, () => onPin('right'), pinned === 'right'),
+    ];
+    if (pinned) {
+      pinItems.push(item('unpin', localeText.columnMenuUnpin, <PushPinOutlinedIcon fontSize="small" />, () => onPin(null)));
+    }
+    sections.push(pinItems);
   }
   const columnItems: ReactNode[] = [];
   if (onHide) {

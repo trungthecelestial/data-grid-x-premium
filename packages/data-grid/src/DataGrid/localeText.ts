@@ -69,4 +69,8 @@ export const DEFAULT_LOCALE_TEXT: GridLocaleText = {
   columnMenuUngroupBy: (columnName) => `Stop grouping by ${columnName}`,
   columnMenuHideColumn: 'Hide column',
   columnMenuManageColumns: 'Manage columns',
+  columnMenuPinLeft: 'Pin to left',
+  columnMenuPinRight: 'Pin to right',
+  columnMenuUnpin: 'Unpin',
+  headerFilterOperator: 'Operator',
 };

@@ -25,20 +25,23 @@ export interface GridFilterPanelProps<R extends GridValidRowModel> {
   localeText: GridLocaleText;
 }
 
-interface ValueInputProps<R extends GridValidRowModel> {
+export interface ValueInputProps<R extends GridValidRowModel> {
   column: GridColDef<R>;
   operator: GridFilterOperator<R> | undefined;
   item: GridFilterItem;
   localeText: GridLocaleText;
   onChange: (value: unknown) => void;
+  /** Fills the width of the parent instead of the panel's fixed 140px. */
+  fullWidth?: boolean;
 }
 
-function FilterValueInput<R extends GridValidRowModel>(props: ValueInputProps<R>) {
-  const { column, operator, item, localeText, onChange } = props;
+export function FilterValueInput<R extends GridValidRowModel>(props: ValueInputProps<R>) {
+  const { column, operator, item, localeText, onChange, fullWidth } = props;
   const label = localeText.filterPanelValue;
+  const width = fullWidth ? '100%' : 140;
 
   if (!operator || operator.requiresFilterValue === false) {
-    return <Box sx={{ width: 140 }} />;
+    return <Box sx={{ width }} />;
   }
 
   if (operator.inputType === 'multi' && column.type === 'singleSelect') {
@@ -47,7 +50,7 @@ function FilterValueInput<R extends GridValidRowModel>(props: ValueInputProps<R>
         multiple
         size="small"
         variant="standard"
-        sx={{ width: 140 }}
+        sx={{ width }}
         value={Array.isArray(item.value) ? item.value : []}
         onChange={(event) => onChange(event.target.value)}
         inputProps={{ 'aria-label': label }}
@@ -66,7 +69,7 @@ function FilterValueInput<R extends GridValidRowModel>(props: ValueInputProps<R>
       <TextField
         size="small"
         variant="standard"
-        sx={{ width: 140 }}
+        sx={{ width }}
         placeholder="a, b, c"
         value={Array.isArray(item.value) ? item.value.join(', ') : ''}
         onChange={(event) =>
@@ -95,7 +98,7 @@ function FilterValueInput<R extends GridValidRowModel>(props: ValueInputProps<R>
         size="small"
         variant="standard"
         displayEmpty
-        sx={{ width: 140 }}
+        sx={{ width }}
         value={item.value ?? ''}
         onChange={(event) => onChange(event.target.value)}
         inputProps={{ 'aria-label': label }}
@@ -114,7 +117,7 @@ function FilterValueInput<R extends GridValidRowModel>(props: ValueInputProps<R>
     <TextField
       size="small"
       variant="standard"
-      sx={{ width: 140 }}
+      sx={{ width }}
       type={operator.inputType ?? 'text'}
       value={item.value ?? ''}
       onChange={(event) => onChange(event.target.value)}

@@ -64,10 +64,11 @@ function Overview() {
         columns={columns}
         showToolbar
         checkboxSelection
+        headerFilters
         height={520}
         pageSizeOptions={[25, 50, 100]}
-        pinnedColumns={{ left: ['name'] }}
         initialState={{
+          pinnedColumns: { left: ['name'] },
           sorting: { sortModel: [{ field: 'salary', sort: 'desc' }] },
           pagination: { paginationModel: { page: 0, pageSize: 25 } },
           aggregation: { model: { salary: 'avg', age: 'max' } },
@@ -92,6 +93,21 @@ function Virtualized() {
       density="compact"
     />
   );
+}
+
+const wideColumns: GridColDef<Record<string, number>>[] = Array.from({ length: 60 }, (_, index) => ({
+  field: `col${index}`,
+  headerName: `Column ${index + 1}`,
+  type: 'number',
+  width: 120,
+}));
+const wideRows = Array.from({ length: 200 }, (_, row) => ({
+  id: row + 1,
+  ...Object.fromEntries(wideColumns.map((column, index) => [column.field, row * 100 + index])),
+}));
+
+function WideColumns() {
+  return <DataGrid rows={wideRows} columns={wideColumns} pagination={false} height={420} headerFilters initialState={{ pinnedColumns: { left: ['col0'] } }} />;
 }
 
 const fileRows = [
@@ -156,6 +172,7 @@ function MasterDetail() {
 const TABS = [
   { label: 'Overview', element: <Overview /> },
   { label: 'Virtualized (1000 rows)', element: <Virtualized /> },
+  { label: 'Wide (60 columns)', element: <WideColumns /> },
   { label: 'Tree data', element: <TreeData /> },
   { label: 'Row grouping', element: <RowGrouping /> },
   { label: 'Master-detail', element: <MasterDetail /> },

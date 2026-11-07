@@ -120,6 +120,8 @@ export interface GridColDef<R extends GridValidRowModel = GridValidRowModel> {
   sortable?: boolean;
   filterable?: boolean;
   hideable?: boolean;
+  /** Set to false to keep the column out of the pin actions of its menu. */
+  pinnable?: boolean;
   resizable?: boolean;
   /** Prevents the column from being dragged to a new position. */
   disableReorder?: boolean;
@@ -260,6 +262,10 @@ export interface GridLocaleText {
   columnMenuUngroupBy: (columnName: string) => string;
   columnMenuHideColumn: string;
   columnMenuManageColumns: string;
+  columnMenuPinLeft: string;
+  columnMenuPinRight: string;
+  columnMenuUnpin: string;
+  headerFilterOperator: string;
 }
 
 export interface GridToolbarProps<R extends GridValidRowModel = GridValidRowModel> {
@@ -539,6 +545,14 @@ export interface DataGridProps<R extends GridValidRowModel = GridValidRowModel> 
   disableColumnReorder?: boolean;
   /** Hides the menu button in each column header. */
   disableColumnMenu?: boolean;
+  /** Removes the pin actions from the column menu. Pinning through `pinnedColumns` and the api still works. */
+  disableColumnPinning?: boolean;
+  /** Renders every column instead of only the ones in view. Row virtualization is separate. */
+  disableColumnVirtualization?: boolean;
+  /** Extra columns rendered on each side of the viewport. Defaults to 3. */
+  columnBuffer?: number;
+  /** Shows a filter row under the column headers. Each cell edits the filter item of its column. */
+  headerFilters?: boolean;
 
   editMode?: 'cell' | 'row';
   /** Called with the edited row before it is committed. Return the row to keep, or throw to reject. */
