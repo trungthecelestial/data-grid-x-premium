@@ -673,19 +673,46 @@ export interface GridDataSourceGetRowsParams {
   sortModel: GridSortModel;
   filterModel: GridFilterModel;
   paginationModel: GridPaginationModel;
+  /** Index of the first requested row. */
+  start: number;
+  /** Index of the last requested row, inclusive. */
+  end: number;
+  /** Keys from the top level down to the parent whose children are wanted. Empty for the top level, which is the only paginated level. */
+  groupKeys: string[];
+  /** Columns the rows are grouped by. With `groupKeys.length < groupFields.length` the response holds group rows. */
+  groupFields: string[];
+  aggregationModel: GridAggregationModel;
 }
 
 export interface GridDataSourceGetRowsResult<R extends GridValidRowModel = GridValidRowModel> {
   rows: R[];
-  /** Total number of rows on the server, across all pages. */
-  rowCount: number;
+  /** Total number of rows on the server, across all pages. Leave it out when counting is too costly. */
+  rowCount?: number;
+  /** Says whether more rows follow when `rowCount` is left out. Defaults to whether the page came back full. */
+  pageInfo?: { hasNextPage?: boolean };
+  /** A row holding the grand totals, read through `getAggregatedValue`. */
+  aggregateRow?: R;
 }
 
-/** Loads rows from a server. Sorting, filtering and pagination then run on the server. */
+export interface GridDataSourceCache {
+  get: (params: GridDataSourceGetRowsParams) => GridDataSourceGetRowsResult<any> | undefined;
+  set: (params: GridDataSourceGetRowsParams, response: GridDataSourceGetRowsResult<any>) => void;
+  clear: () => void;
+}
+
+/** Loads rows from a server. Sorting, filtering and pagination then run on the server, and so do grouping, tree data and aggregation where the callbacks below are given. */
 export interface GridDataSource<R extends GridValidRowModel = GridValidRowModel> {
   getRows: (params: GridDataSourceGetRowsParams) => Promise<GridDataSourceGetRowsResult<R>>;
   /** Called when `getRows` rejects. */
   onError?: (error: unknown, params: GridDataSourceGetRowsParams) => void;
+  /** Key of a group or tree row among its siblings. Needed, with `getChildrenCount`, for the server to nest rows. */
+  getGroupKey?: (row: R) => string | number;
+  /** Number of children of a group or tree row. Rows with children get an expander that loads them on demand. */
+  getChildrenCount?: (row: R) => number;
+  /** Reads a server-calculated aggregate from a row. Without it, aggregation runs over the loaded rows only. */
+  getAggregatedValue?: (row: R, field: string) => unknown;
+  /** Saves an edited row. Return the stored row, or nothing to keep the edit as it is. Reject to refuse the edit. */
+  updateRow?: (params: { rowId: GridRowId; updatedRow: R; previousRow: R }) => Promise<R | void>;
 }
 
 export interface DataGridProps<R extends GridValidRowModel = GridValidRowModel> {
@@ -697,6 +724,15 @@ export interface DataGridProps<R extends GridValidRowModel = GridValidRowModel> 
    * Turns sorting, filtering and pagination to `server` mode. Results of stale requests are dropped.
    */
   dataSource?: GridDataSource<R>;
+  /** Stores `dataSource` responses, for five minutes by default. Pass `null` to always ask the server. `apiRef.refetch` and saved edits clear it. */
+  dataSourceCache?: GridDataSourceCache | null;
+  /**
+   * With `dataSource`: replaces the pages with one long list that loads rows as they scroll into view, in batches of the page size.
+   * Unavailable while the server nests rows through grouping or tree data.
+   */
+  lazyLoading?: boolean;
+  /** Time in ms between lazy loading requests while scrolling. Defaults to 300. */
+  lazyLoadingRequestThrottleMs?: number;
   /** Returns the unique id of a row. Defaults to `row.id`. */
   getRowId?: (row: R) => GridRowId;
   apiRef?: GridApiRef;

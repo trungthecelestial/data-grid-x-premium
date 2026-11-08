@@ -1,4 +1,4 @@
-import { DataGrid, GRID_AGGREGATION_FUNCTIONS, useGridApiRef, type GridAggregationFunctionDef, type GridColDef } from '@dna/data-grid';
+import { DataGrid, GRID_AGGREGATION_FUNCTIONS, useGridApiRef, type GridAggregationFunctionDef, type GridColDef, type GridDataSource } from '@dna/data-grid';
 import { dnaTheme } from '@dna/dna-ui';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
@@ -270,8 +270,68 @@ function AutoRowHeight() {
   );
 }
 
+type ServerRow = Partial<Omit<Employee, 'id'>> & { id: number | string; groupKey?: string; childCount?: number };
+
+/** Stands in for a backend: it sorts, groups and sums on its side and answers after a delay. */
+const fakeServer: GridDataSource<ServerRow> = {
+  getGroupKey: (row) => row.groupKey ?? '',
+  getChildrenCount: (row) => row.childCount ?? 0,
+  getAggregatedValue: (row, field) => row[field as keyof Employee],
+  updateRow: async ({ updatedRow }) => {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    return updatedRow;
+  },
+  getRows: async ({ sortModel, groupKeys, groupFields, start, end }) => {
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    const inPath = employees.filter((row) => groupKeys.every((key, level) => String(row[groupFields[level] as keyof Employee]) === key));
+    const sum = (rows: Employee[]) => rows.reduce((total, row) => total + row.salary, 0);
+    const aggregateRow = { id: 'totals', salary: sum(employees) };
+    const field = groupFields[groupKeys.length] as keyof Employee | undefined;
+    if (field) {
+      const keys = [...new Set(inPath.map((row) => String(row[field])))].sort();
+      const groups = keys.map((key) => {
+        const rows = inPath.filter((row) => String(row[field]) === key);
+        return { id: [...groupKeys, key].join('/'), groupKey: key, childCount: groupKeys.length + 1 < groupFields.length ? new Set(rows.map((row) => row[groupFields[groupKeys.length + 1] as keyof Employee])).size : rows.length, salary: sum(rows) };
+      });
+      return { rows: groups, rowCount: groups.length, aggregateRow };
+    }
+    const sort = sortModel[0];
+    const sorted = sort?.sort
+      ? [...inPath].sort((a, b) => (String(a[sort.field as keyof Employee]) < String(b[sort.field as keyof Employee]) ? -1 : 1) * (sort.sort === 'desc' ? -1 : 1))
+      : inPath;
+    return { rows: groupKeys.length > 0 ? sorted : sorted.slice(start, end + 1), rowCount: sorted.length, aggregateRow };
+  },
+};
+
+function ServerSide() {
+  const [lazy, setLazy] = useState(false);
+  const serverColumns = columns as unknown as GridColDef<ServerRow>[];
+  return (
+    <>
+      <Box sx={{ mb: 1, display: 'flex', alignItems: 'center', gap: 2 }}>
+        <Typography variant="body2">Every request takes 400ms. Group by a column from its menu, or switch to lazy loading and scroll.</Typography>
+        <Button size="small" variant="outlined" onClick={() => setLazy((value) => !value)}>
+          {lazy ? 'Use pages' : 'Use lazy loading'}
+        </Button>
+      </Box>
+      <DataGrid
+        key={String(lazy)}
+        rows={[]}
+        columns={serverColumns}
+        dataSource={fakeServer}
+        lazyLoading={lazy}
+        showToolbar
+        height={520}
+        pageSizeOptions={[25, 50]}
+        initialState={lazy ? { aggregation: { model: { salary: 'sum' } } } : { rowGrouping: { model: ['team', 'role'] }, aggregation: { model: { salary: 'sum' } } }}
+      />
+    </>
+  );
+}
+
 const TABS = [
   { label: 'Overview', element: <Overview /> },
+  { label: 'Server-side', element: <ServerSide /> },
   { label: 'Pivoting', element: <Pivoting /> },
   { label: 'Auto row height', element: <AutoRowHeight /> },
   { label: 'Virtualized (1000 rows)', element: <Virtualized /> },

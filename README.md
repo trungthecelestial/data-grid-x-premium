@@ -64,6 +64,22 @@ Add `getCellValue` when a function needs more of the row than the cell, as a wei
 
 Return `'auto'` from `getRowHeight` to size a row to its content. `rowHeight` becomes the minimum, and text wraps. Heights are measured as rows render and kept up to date when content or column widths change. Give `getEstimatedRowHeight` a value close to the typical height to keep the scrollbar steady, and call `apiRef.current.resetRowHeights()` to measure again from scratch.
 
+## Server-side data
+
+Pass `dataSource` and sorting, filtering and pagination run on your server. The other parts are opt-in:
+
+| To get | Add |
+| --- | --- |
+| Row grouping or tree data on the server, loading children on expand | `getGroupKey` and `getChildrenCount`, then read `groupKeys` and `groupFields` in `getRows` |
+| Aggregates calculated on the server | `getAggregatedValue`, and `aggregateRow` in the response for the footer |
+| Saving edits | `updateRow` |
+| One long list that loads as it scrolls | The `lazyLoading` prop |
+| Paging without a total | Leave out `rowCount`, optionally returning `pageInfo.hasNextPage` |
+
+Responses are cached for five minutes. Pass your own `dataSourceCache`, or `null` to turn it off. `apiRef.current.refetch()` empties the cache and loads again.
+
+Only the top level is paginated, so a response for `groupKeys` with entries should hold all children of that parent. Pivoting stays client-side.
+
 ## Scripts
 
 | Command | Description |

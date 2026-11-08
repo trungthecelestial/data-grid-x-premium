@@ -8,4 +8,5 @@ export { DEFAULT_LOCALE_TEXT } from './localeText';
 export { getDefaultFilterOperators } from './features/filtering';
 export { buildCsv } from './features/export';
 export { GRID_AGGREGATION_FUNCTIONS } from './features/aggregation';
+export { GridDataSourceCacheDefault } from './features/dataSourceCache';
 export type * from './DataGrid.types';

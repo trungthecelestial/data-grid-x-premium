@@ -45,6 +45,9 @@ export interface UseGridRowsParams<R extends GridValidRowModel> {
   pageSize: number;
   aggregationModel: GridAggregationModel;
   aggregationFunctions: GridAggregationFunctions;
+  /** Rows generated for a group, which are left out of `filteredRows`. */
+  isGroupRow?: (row: R) => boolean;
+  isPlaceholderRow?: (row: R) => boolean;
 }
 
 export interface UseGridRowsResult<R extends GridValidRowModel> {
@@ -83,6 +86,8 @@ export function useGridRows<R extends GridValidRowModel>(params: UseGridRowsPara
     pageSize,
     aggregationModel,
     aggregationFunctions,
+    isGroupRow,
+    isPlaceholderRow,
   } = params;
 
   const isGroup = (treeData && Boolean(getTreeDataPath)) || rowGroupingModel.length > 0;
@@ -94,7 +99,7 @@ export function useGridRows<R extends GridValidRowModel>(params: UseGridRowsPara
 
     if (!isGroup) {
       const filtered = predicate ? rows.filter(predicate) : [...rows];
-      return buildFlatNodes(comparator ? filtered.sort(comparator) : filtered, getRowId);
+      return buildFlatNodes(comparator ? filtered.sort(comparator) : filtered, getRowId, isPlaceholderRow);
     }
 
     let tree =
@@ -122,6 +127,7 @@ export function useGridRows<R extends GridValidRowModel>(params: UseGridRowsPara
     treeData,
     getTreeDataPath,
     rowGroupingModel,
+    isPlaceholderRow,
   ]);
 
   const isExpanded = useMemo(
@@ -142,8 +148,8 @@ export function useGridRows<R extends GridValidRowModel>(params: UseGridRowsPara
 
   const filteredRows = useMemo(
     () =>
-      flattenTree(roots, () => true).flatMap((node) => (node.row ? [node.row] : [])),
-    [roots],
+      flattenTree(roots, () => true).flatMap((node) => (node.row && !isGroupRow?.(node.row) ? [node.row] : [])),
+    [roots, isGroupRow],
   );
 
   const hasAggregation = Object.keys(aggregationModel).length > 0;

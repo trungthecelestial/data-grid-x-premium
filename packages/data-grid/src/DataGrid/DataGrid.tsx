@@ -109,6 +109,7 @@ import { applySortClick, DEFAULT_SORTING_ORDER } from './features/sorting';
 import { collectRows, type GridTreeNode } from './features/tree';
 import { useElementSize } from './hooks/useElementSize';
 import { useGridRows } from './hooks/useGridRows';
+import { useGridDataSource, type GridServerRows } from './hooks/useGridDataSource';
 import { useGridState } from './hooks/useGridState';
 import { useMeasuredRowHeights } from './hooks/useMeasuredRowHeights';
 import { getOffsets, getVirtualRange } from './hooks/virtualization';
@@ -232,7 +233,7 @@ interface GridPivoting<R extends GridValidRowModel> {
   sourceRowsRef: MutableRefObject<{ source: readonly R[]; rows: readonly R[] } | null>;
 }
 
-type DataGridBaseProps<R extends GridValidRowModel> = DataGridProps<R> & { onRefetchRequest?: () => void; pivoting?: GridPivoting<R> };
+type DataGridBaseProps<R extends GridValidRowModel> = DataGridProps<R> & { onRefetchRequest?: () => void; pivoting?: GridPivoting<R>; serverRows?: GridServerRows<R> };
 
 function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: DataGridBaseProps<R>) {
   const {
@@ -291,6 +292,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     getRowHeight,
     getEstimatedRowHeight,
     pivoting,
+    serverRows,
     aggregationFunctions = GRID_AGGREGATION_FUNCTIONS,
     isCellEditable,
     slotProps,
@@ -464,6 +466,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
   }, [rows, rowUpdates, rowOrder, getRowId]);
 
   const isPivoted = pivoting?.applied ?? false;
+  const serverAggregated = Boolean(serverRows?.getAggregatedValue);
   if (pivoting && !isPivoted) {
     pivoting.sourceRowsRef.current = { source: rows, rows: mergedRows };
   }
@@ -549,9 +552,11 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
       paginationMode,
       page: paginationModel.page,
       pageSize: paginationModel.pageSize,
-      // Pivot cells arrive aggregated. Aggregating the generated rows again would give wrong totals.
-      aggregationModel: isPivoted ? EMPTY_OBJECT : aggregationModel,
+      // Pivot cells and server aggregates arrive calculated. Aggregating the loaded rows again would give wrong totals.
+      aggregationModel: isPivoted || serverAggregated ? EMPTY_OBJECT : aggregationModel,
       aggregationFunctions,
+      isGroupRow: serverRows?.groupsByColumns ? serverRows.isGroupRow : undefined,
+      isPlaceholderRow: serverRows?.isPlaceholderRow,
     },
   );
 
@@ -674,6 +679,8 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
   );
   const [fetchingIds, setFetchingIds] = useState<ReadonlySet<GridRowId>>(EMPTY_SET);
   const requestedChildrenRef = useRef(new Set<GridRowId>());
+  const serverChildrenKey = serverRows?.childrenKey;
+  useEffect(() => requestedChildrenRef.current.clear(), [serverChildrenKey]);
   useEffect(() => {
     if (!onFetchChildren) {
       return;
@@ -826,7 +833,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     }
 
     if (isGroup) {
-      const byRowGrouping = rowGroupingModel.length > 0 && !treeData;
+      const byRowGrouping = rowGroupingModel.length > 0 && (!treeData || Boolean(serverRows?.groupsByColumns));
       result.push({
         field: byRowGrouping ? ROW_GROUP_FIELD : TREE_GROUP_FIELD,
         headerName: byRowGrouping ? localeText.rowGroupingHeader : localeText.treeDataGroupHeader,
@@ -842,7 +849,14 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
             return null;
           }
           const expandable = node.children.length > 0 || needsChildren(node);
-          const label = byRowGrouping ? (node.groupField ? `${node.label} (${node.rowCount})` : '') : node.label;
+          const serverGroup = node.row && serverRows?.isGroupRow(node.row);
+          const label = serverGroup
+            ? `${node.label} (${getChildrenCount?.(node.row as R) ?? 0})`
+            : byRowGrouping
+              ? node.groupField
+                ? `${node.label} (${node.rowCount})`
+                : ''
+              : node.label;
           return (
             <Box sx={{ display: 'flex', alignItems: 'center', minWidth: 0, pl: `${node.depth * 20}px` }}>
               {expandable ? (
@@ -905,6 +919,8 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     subtreeRowIds,
     needsChildren,
     fetchingIds,
+    serverRows,
+    getChildrenCount,
   ]);
 
   const { columns, leftCount, rightStart } = useMemo(() => {
@@ -1058,6 +1074,9 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
   );
 
   useLayoutEffect(measureRows, [measureRows, range.start, range.end, entries, widths, measuredHeights]);
+
+  const onRenderedRangeChange = serverRows?.onRenderedRangeChange;
+  useEffect(() => onRenderedRangeChange?.(range.start, range.end), [onRenderedRangeChange, range.start, range.end]);
 
   const rowEntryIndexes = useMemo(
     () => entries.flatMap((entry, index) => (entry.kind === 'row' ? [index] : [])),
@@ -1843,7 +1862,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
         }}
         grouped={rowGroupingModel.includes(field)}
         onToggleGroup={
-          disableRowGrouping || treeData || column.type === 'actions'
+          disableRowGrouping || (treeData && !serverRows?.groupsByColumns) || column.type === 'actions'
             ? undefined
             : () => setRowGroupingModel(rowGroupingModel.includes(field) ? rowGroupingModel.filter((item) => item !== field) : [...rowGroupingModel, field])
         }
@@ -2215,6 +2234,17 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
 
   const renderValue = (column: GridColDef<R>, node: GridTreeNode<R>, row: R, wrapText: boolean): ReactNode => {
     const id = node.id;
+    if (node.placeholder) {
+      return SPECIAL_FIELDS.has(column.field) ? null : <Skeleton variant="text" sx={{ width: '80%' }} />;
+    }
+    if (node.row && serverRows?.isGroupRow(node.row) && !SPECIAL_FIELDS.has(column.field)) {
+      const fn = aggregationModel[column.field];
+      if (!fn || !serverRows.getAggregatedValue) {
+        return null;
+      }
+      const formatted = formatAggregate(fn, serverRows.getAggregatedValue(node.row, column.field), column, aggregationFunctions[fn]);
+      return `${formatted} (${getAggregationLabel(fn, aggregationFunctions, localeText).toLowerCase()})`;
+    }
     if (column.type === 'actions' && column.getActions) {
       return column.getActions({ id, row, field: column.field });
     }
@@ -2666,7 +2696,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
   const footerRowCount = paginationMode === 'server' ? (rowCount ?? totalRowCount) : totalRowCount;
   const bottomRows = pinnedRows?.bottom ?? EMPTY_ARRAY;
   const topRows = pinnedRows?.top ?? EMPTY_ARRAY;
-  const footerValues = isPivoted ? (pivoting?.totals ?? null) : footerAggregates;
+  const footerValues = isPivoted ? (pivoting?.totals ?? null) : serverAggregated ? (serverRows?.footerAggregates ?? null) : footerAggregates;
   const hasFooterAggregates = footerValues !== null && Object.keys(footerValues).length > 0;
 
   return (
@@ -2880,67 +2910,11 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
   );
 }
 
-/** Keeps the sort, filter and page models, and loads `rows` and `rowCount` from the data source whenever one of them changes. */
+/** Loads `rows` and `rowCount` from the data source whenever what they depend on changes. */
 function DataSourceGrid<R extends GridValidRowModel>(props: DataGridProps<R> & { dataSource: GridDataSource<R> }) {
-  const { dataSource, initialState, pageSizeOptions = DEFAULT_PAGE_SIZE_OPTIONS } = props;
-  const [sortModel, setSortModel] = useGridState(props.sortModel, initialState?.sorting?.sortModel ?? [], props.onSortModelChange);
-  const [filterModel, setFilterModel] = useGridState(
-    props.filterModel,
-    initialState?.filter?.filterModel ?? DEFAULT_FILTER_MODEL,
-    props.onFilterModelChange,
-  );
-  const [paginationModel, setPaginationModel] = useGridState(
-    props.paginationModel,
-    initialState?.pagination?.paginationModel ?? { page: 0, pageSize: pageSizeValue(pageSizeOptions[0] ?? 10) },
-    props.onPaginationModelChange,
-  );
-  const [result, setResult] = useState<{ rows: R[]; rowCount: number }>({ rows: [], rowCount: 0 });
-  const [loading, setLoading] = useState(true);
-  const [refetchTick, setRefetchTick] = useState(0);
-  const requestRef = useRef(0);
-  const dataSourceRef = useRef(dataSource);
-  dataSourceRef.current = dataSource;
-
-  useEffect(() => {
-    const request = (requestRef.current += 1);
-    const params = { sortModel, filterModel, paginationModel };
-    setLoading(true);
-    dataSourceRef.current.getRows(params).then(
-      (next) => {
-        if (request === requestRef.current) {
-          setResult(next);
-          setLoading(false);
-        }
-      },
-      (error: unknown) => {
-        if (request === requestRef.current) {
-          setLoading(false);
-          dataSourceRef.current.onError?.(error, params);
-        }
-      },
-    );
-  }, [sortModel, filterModel, paginationModel, refetchTick]);
-
-  const refetch = useCallback(() => setRefetchTick((tick) => tick + 1), []);
-
-  return (
-    <DataGridBase<R>
-      {...props}
-      rows={result.rows}
-      rowCount={result.rowCount}
-      loading={props.loading || loading}
-      sortModel={sortModel}
-      onSortModelChange={setSortModel}
-      filterModel={filterModel}
-      onFilterModelChange={setFilterModel}
-      paginationModel={paginationModel}
-      onPaginationModelChange={setPaginationModel}
-      sortingMode="server"
-      filterMode="server"
-      paginationMode="server"
-      onRefetchRequest={refetch}
-    />
-  );
+  const { pageSizeOptions = DEFAULT_PAGE_SIZE_OPTIONS } = props;
+  const serverProps = useGridDataSource(props, { page: 0, pageSize: pageSizeValue(pageSizeOptions[0] ?? 10) });
+  return <DataGridBase<R> {...props} {...serverProps} />;
 }
 
 const getPivotRowId = (row: GridValidRowModel): GridRowId => row[PIVOT_ROW_ID];
