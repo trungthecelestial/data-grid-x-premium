@@ -10,6 +10,7 @@ export interface GridCellEditorProps<R extends GridValidRowModel> {
   colDef: GridColDef<R>;
   value: unknown;
   autoFocus?: boolean;
+  error?: boolean;
   /** Saves when focus leaves the editor. Used by cell edit mode. */
   commitOnBlur?: boolean;
   onChange: (value: unknown) => void;
@@ -32,7 +33,7 @@ function toInputValue(value: unknown, withTime: boolean): string {
 }
 
 export function GridCellEditor<R extends GridValidRowModel>(props: GridCellEditorProps<R>) {
-  const { colDef, value, autoFocus, commitOnBlur, onChange, onCommit, onCancel } = props;
+  const { colDef, value, autoFocus, error, commitOnBlur, onChange, onCommit, onCancel } = props;
 
   const handleKeyDown = (event: KeyboardEvent) => {
     if (event.key === 'Enter') {
@@ -59,6 +60,7 @@ export function GridCellEditor<R extends GridValidRowModel>(props: GridCellEdito
           size="small"
           autoFocus={autoFocus}
           checked={Boolean(value)}
+          color={error ? 'error' : undefined}
           onChange={(event) => onChange(event.target.checked)}
           onKeyDown={handleKeyDown}
           onBlur={handleBlur}
@@ -69,6 +71,7 @@ export function GridCellEditor<R extends GridValidRowModel>(props: GridCellEdito
         <Select
           size="small"
           variant="standard"
+          error={error}
           fullWidth
           autoFocus={autoFocus}
           value={value ?? ''}
@@ -92,13 +95,14 @@ export function GridCellEditor<R extends GridValidRowModel>(props: GridCellEdito
         <InputBase
           fullWidth
           autoFocus={autoFocus}
+          error={error}
           type="number"
           value={value ?? ''}
           onChange={(event) => onChange(event.target.value === '' ? null : Number(event.target.value))}
           onKeyDown={handleKeyDown}
           onBlur={handleBlur}
           inputProps={{ 'aria-label': colDef.headerName ?? colDef.field }}
-          sx={{ font: 'inherit' }}
+          sx={{ font: 'inherit', ...(error && { color: 'error.main' }) }}
         />
       );
     case 'date':
@@ -108,13 +112,14 @@ export function GridCellEditor<R extends GridValidRowModel>(props: GridCellEdito
         <InputBase
           fullWidth
           autoFocus={autoFocus}
+          error={error}
           type={withTime ? 'datetime-local' : 'date'}
           value={toInputValue(value, withTime)}
           onChange={(event) => onChange(event.target.value === '' ? null : new Date(event.target.value))}
           onKeyDown={handleKeyDown}
           onBlur={handleBlur}
           inputProps={{ 'aria-label': colDef.headerName ?? colDef.field }}
-          sx={{ font: 'inherit' }}
+          sx={{ font: 'inherit', ...(error && { color: 'error.main' }) }}
         />
       );
     }
@@ -123,12 +128,13 @@ export function GridCellEditor<R extends GridValidRowModel>(props: GridCellEdito
         <InputBase
           fullWidth
           autoFocus={autoFocus}
+          error={error}
           value={value ?? ''}
           onChange={(event) => onChange(event.target.value)}
           onKeyDown={handleKeyDown}
           onBlur={handleBlur}
           inputProps={{ 'aria-label': colDef.headerName ?? colDef.field }}
-          sx={{ font: 'inherit' }}
+          sx={{ font: 'inherit', ...(error && { color: 'error.main' }) }}
         />
       );
   }

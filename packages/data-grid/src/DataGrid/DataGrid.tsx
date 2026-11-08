@@ -7,7 +7,9 @@ import MoreVertIcon from '@mui/icons-material/MoreVert';
 import Box from '@mui/material/Box';
 import Checkbox from '@mui/material/Checkbox';
 import IconButton from '@mui/material/IconButton';
+import CircularProgress from '@mui/material/CircularProgress';
 import LinearProgress from '@mui/material/LinearProgress';
+import Skeleton from '@mui/material/Skeleton';
 import Paper from '@mui/material/Paper';
 import Popover from '@mui/material/Popover';
 import Table from '@mui/material/Table';
@@ -63,7 +65,13 @@ import type {
   GridPaginationModel,
   GridPinnedColumns,
   GridPrintExportOptions,
+  GridCellModesModel,
+  GridDataSource,
+  GridEditCellProps,
+  GridLoadingVariant,
+  GridRowModesModel,
   GridRowId,
+  GridRowSelectionModel,
   GridRowSpacing,
   GridRowUpdate,
   GridSortDirection,
@@ -87,7 +95,7 @@ import { buildCsv, buildPrintHtml, downloadFile, printHtml } from './features/ex
 import { buildXlsx, XLSX_MIME_TYPE } from './features/xlsx';
 import { countActiveFilters, getColumnFilterOperators, getInitialFilterValue, isFilterable } from './features/filtering';
 import { applySortClick, DEFAULT_SORTING_ORDER } from './features/sorting';
-import type { GridTreeNode } from './features/tree';
+import { collectRows, type GridTreeNode } from './features/tree';
 import { useElementSize } from './hooks/useElementSize';
 import { useGridRows } from './hooks/useGridRows';
 import { useGridState } from './hooks/useGridState';
@@ -161,13 +169,43 @@ interface EditState {
   /** Set in cell edit mode. Row edit mode edits every editable cell of the row. */
   field?: string;
   values: Record<string, unknown>;
+  /** Fields whose `preProcessEditCellProps` flagged the value as invalid. */
+  errors?: Record<string, boolean>;
+  /** Row edit mode: the field that gets the focus. Defaults to the first editable one. */
+  focusField?: string;
 }
 
 export function useGridApiRef(): GridApiRef {
   return useRef({} as GridApi);
 }
 
-export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props: DataGridProps<R>) {
+function GridLoadingIndicator({ variant, label }: { variant: GridLoadingVariant; label: string }) {
+  if (variant === 'circular-progress') {
+    return (
+      <Box sx={{ position: 'absolute', inset: 0, zIndex: 5, display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}>
+        <CircularProgress aria-label={label} />
+      </Box>
+    );
+  }
+  if (variant === 'skeleton') {
+    return (
+      <Box
+        role="progressbar"
+        aria-label={label}
+        sx={{ position: 'absolute', inset: 0, zIndex: 5, p: 2, bgcolor: 'background.paper', opacity: 0.9, overflow: 'hidden' }}
+      >
+        {Array.from({ length: 8 }, (_, index) => (
+          <Skeleton key={index} variant="text" sx={{ height: 36 }} />
+        ))}
+      </Box>
+    );
+  }
+  return <LinearProgress aria-label={label} sx={{ position: 'absolute', left: 0, right: 0, top: 0, zIndex: 5 }} />;
+}
+
+type DataGridBaseProps<R extends GridValidRowModel> = DataGridProps<R> & { onRefetchRequest?: () => void };
+
+function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: DataGridBaseProps<R>) {
   const {
     rows,
     columns: userColumns,
@@ -190,6 +228,12 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     pageSizeOptions = DEFAULT_PAGE_SIZE_OPTIONS,
     hideFooter = false,
     checkboxSelection = false,
+    disableMultipleRowSelection = false,
+    rowSelectionPropagation,
+    getChildrenCount,
+    onFetchChildren,
+    rowSpanning = false,
+    loadingVariant = 'linear-progress',
     rowSelection = true,
     disableRowSelectionOnClick = false,
     isRowSelectable,
@@ -261,10 +305,19 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     initialState?.pagination?.paginationModel ?? { page: 0, pageSize: pageSizeValue(pageSizeOptions[0] ?? 10) },
     props.onPaginationModelChange,
   );
-  const [selection, setSelection] = useGridState(
+  const [selection, setSelectionRaw] = useGridState(
     props.rowSelectionModel,
     initialState?.rowSelection ?? EMPTY_ARRAY,
     props.onRowSelectionModelChange,
+  );
+  // With `disableMultipleRowSelection` only the most recently selected row is kept.
+  const setSelection = useCallback(
+    (next: GridRowSelectionModel | ((previous: GridRowSelectionModel) => GridRowSelectionModel)) =>
+      setSelectionRaw((previous) => {
+        const resolved = typeof next === 'function' ? next(previous) : next;
+        return disableMultipleRowSelection && resolved.length > 1 ? resolved.slice(-1) : resolved;
+      }),
+    [setSelectionRaw, disableMultipleRowSelection],
   );
   const [cellSelection, setCellSelection] = useGridState<GridCellSelectionModel>(
     props.cellSelectionModel,
@@ -313,6 +366,7 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
   const [rowOrder, setRowOrder] = useState<{ source: readonly R[]; ids: readonly GridRowId[] } | null>(null);
   const [dropTarget, setDropTarget] = useState<{ id: GridRowId; after: boolean } | null>(null);
   const [editing, setEditing] = useState<EditState | null>(null);
+  const validationTokensRef = useRef<Record<string, number>>({});
   const [focusPosition, setFocusPosition] = useState<{ row: number; col: number } | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [scrollLeft, setScrollLeft] = useState(0);
@@ -426,7 +480,7 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     [orderedFields, userColumnMap, effectiveVisibility],
   );
 
-  const { pageNodes, rootCount, page, filteredRows, nodeAggregates, footerAggregates, isExpanded, isGroup } = useGridRows(
+  const { pageNodes, roots, rootCount, page, filteredRows, nodeAggregates, footerAggregates, isExpanded, isGroup } = useGridRows(
     {
       rows: mergedRows,
       getRowId,
@@ -487,13 +541,104 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     [isExpanded],
   );
 
+  const propagateDescendants = Boolean(isGroup && rowSelectionPropagation?.descendants);
+  const propagateParents = Boolean(isGroup && rowSelectionPropagation?.parents);
+
+  // Parent links of the whole tree, for selection that moves through it.
+  const treeIndex = useMemo(() => {
+    const index = new Map<GridRowId, { node: GridTreeNode<R>; parent: GridTreeNode<R> | null }>();
+    if (propagateDescendants || propagateParents) {
+      const visit = (nodes: readonly GridTreeNode<R>[], parent: GridTreeNode<R> | null) => {
+        for (const node of nodes) {
+          index.set(node.id, { node, parent });
+          visit(node.children, node);
+        }
+      };
+      visit(roots, null);
+    }
+    return index;
+  }, [roots, propagateDescendants, propagateParents]);
+
+  /** Ids of the selectable data rows in a node's subtree, the node's own row included. */
+  const subtreeRowIds = useCallback(
+    (node: GridTreeNode<R>): GridRowId[] =>
+      collectRows(node).flatMap((row) => {
+        const rowId = getRowId(row);
+        return isSelectable(rowId, row) ? [rowId] : [];
+      }),
+    [getRowId, isSelectable],
+  );
+
   const toggleSelection = useCallback(
     (id: GridRowId, selected: boolean) => {
       lastSelectedRef.current = id;
-      setSelection((previous) => (selected ? [...previous.filter((item) => item !== id), id] : previous.filter((item) => item !== id)));
+      const entry = treeIndex.get(id);
+      if (!entry) {
+        setSelection((previous) => (selected ? [...previous.filter((item) => item !== id), id] : previous.filter((item) => item !== id)));
+        return;
+      }
+      setSelection((previous) => {
+        const next = new Set(previous);
+        const change = (rowId: GridRowId) => {
+          next.delete(rowId);
+          if (selected) {
+            next.add(rowId);
+          }
+        };
+        if (propagateDescendants) {
+          subtreeRowIds(entry.node).forEach(change);
+        } else if (entry.node.row) {
+          change(id);
+        }
+        if (propagateParents) {
+          const isNodeSelected = (node: GridTreeNode<R>): boolean =>
+            node.children.length === 0 ? next.has(node.id) : node.row ? next.has(node.id) : node.children.every(isNodeSelected);
+          for (let parent = entry.parent; parent; parent = treeIndex.get(parent.id)?.parent ?? null) {
+            if (parent.row && isSelectable(parent.id, parent.row)) {
+              next.delete(parent.id);
+              if (parent.children.every(isNodeSelected)) {
+                next.add(parent.id);
+              }
+            }
+          }
+        }
+        return [...next];
+      });
     },
-    [setSelection],
+    [setSelection, treeIndex, propagateDescendants, propagateParents, subtreeRowIds, isSelectable],
   );
+
+  // Lazy tree children: a row that reports more children than are loaded gets an expander, and expanding it asks the consumer for them once.
+  const needsChildren = useCallback(
+    (node: GridTreeNode<R>) =>
+      treeData && Boolean(getChildrenCount) && node.row !== undefined && getChildrenCount!(node.row) > node.children.length,
+    [treeData, getChildrenCount],
+  );
+  const [fetchingIds, setFetchingIds] = useState<ReadonlySet<GridRowId>>(EMPTY_SET);
+  const requestedChildrenRef = useRef(new Set<GridRowId>());
+  useEffect(() => {
+    if (!onFetchChildren) {
+      return;
+    }
+    for (const node of pageNodes) {
+      if (!node.row || requestedChildrenRef.current.has(node.id) || !isExpanded(node) || !needsChildren(node)) {
+        continue;
+      }
+      requestedChildrenRef.current.add(node.id);
+      const done = () =>
+        setFetchingIds((previous) => {
+          const next = new Set(previous);
+          next.delete(node.id);
+          return next;
+        });
+      setFetchingIds((previous) => new Set(previous).add(node.id));
+      try {
+        Promise.resolve(onFetchChildren({ id: node.id, row: node.row })).then(done, done);
+      } catch {
+        done();
+      }
+    }
+  }, [pageNodes, isExpanded, needsChildren, onFetchChildren]);
 
   const specialColumns = useMemo<GridColDef<R>[]>(() => {
     const result: GridColDef<R>[] = [];
@@ -558,7 +703,8 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
         resizable: false,
         disableReorder: true,
         align: 'center',
-        renderHeader: () => (
+        renderHeader: () =>
+          disableMultipleRowSelection ? null : (
           <Checkbox
             size="small"
             checked={selectableIds.length > 0 && selectedCount === selectableIds.length}
@@ -567,18 +713,25 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
             inputProps={{ 'aria-label': localeText.checkboxSelectionHeader }}
             onChange={(event) => setSelection(event.target.checked ? selectableIds : EMPTY_ARRAY)}
           />
-        ),
-        renderCell: ({ id, row }) => (
-          <Checkbox
-            size="small"
-            checked={selectedSet.has(id)}
-            disabled={!isSelectable(id, row)}
-            tabIndex={-1}
-            inputProps={{ 'aria-label': localeText.checkboxSelectionRow }}
-            onClick={(event) => event.stopPropagation()}
-            onChange={(event) => toggleSelection(id, event.target.checked)}
-          />
-        ),
+          ),
+        renderCell: ({ id, row }) => {
+          const node = treeIndex.get(id)?.node;
+          // With descendant propagation a group shows how many of its rows are selected, and a group without a row of its own is just that.
+          const below = propagateDescendants && node && node.children.length > 0 ? subtreeRowIds(node) : null;
+          const selectedBelow = below ? below.filter((rowId) => selectedSet.has(rowId)).length : 0;
+          return (
+            <Checkbox
+              size="small"
+              checked={below ? below.length > 0 && selectedBelow === below.length : selectedSet.has(id)}
+              indeterminate={below ? selectedBelow > 0 && selectedBelow < below.length : false}
+              disabled={below ? below.length === 0 : !isSelectable(id, row)}
+              tabIndex={-1}
+              inputProps={{ 'aria-label': localeText.checkboxSelectionRow }}
+              onClick={(event) => event.stopPropagation()}
+              onChange={(event) => toggleSelection(id, event.target.checked)}
+            />
+          );
+        },
       });
     }
 
@@ -630,7 +783,7 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
           if (!node) {
             return null;
           }
-          const expandable = node.children.length > 0;
+          const expandable = node.children.length > 0 || needsChildren(node);
           const label = byRowGrouping ? (node.groupField ? `${node.label} (${node.rowCount})` : '') : node.label;
           return (
             <Box sx={{ display: 'flex', alignItems: 'center', minWidth: 0, pl: `${node.depth * 20}px` }}>
@@ -645,7 +798,13 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
                     toggleExpansion(node);
                   }}
                 >
-                  {isExpanded(node) ? <KeyboardArrowDownIcon fontSize="small" /> : <KeyboardArrowRightIcon fontSize="small" />}
+                  {fetchingIds.has(node.id) ? (
+                    <CircularProgress size={16} aria-label={localeText.loadingLabel} />
+                  ) : isExpanded(node) ? (
+                    <KeyboardArrowDownIcon fontSize="small" />
+                  ) : (
+                    <KeyboardArrowRightIcon fontSize="small" />
+                  )}
                 </IconButton>
               ) : (
                 <Box sx={{ width: 30, flexShrink: 0 }} />
@@ -683,6 +842,11 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     nodeById,
     isExpanded,
     toggleExpansion,
+    treeIndex,
+    propagateDescendants,
+    subtreeRowIds,
+    needsChildren,
+    fetchingIds,
   ]);
 
   const { columns, leftCount, rightStart } = useMemo(() => {
@@ -731,9 +895,12 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     return result;
   }, [widths, rightStart]);
 
+  // A spanning cell needs the columns it covers to be rendered with it.
+  const hasColSpan = useMemo(() => columns.some((column) => column.colSpan !== undefined), [columns]);
+
   // Columns scrolled out of view are not rendered. Pinned columns always are, and spacers stand in for the skipped middle columns.
   const colWindow = useMemo(() => {
-    if (disableVirtualization || disableColumnVirtualization || containerWidth === 0 || rightStart <= leftCount) {
+    if (disableVirtualization || disableColumnVirtualization || hasColSpan || containerWidth === 0 || rightStart <= leftCount) {
       return { start: leftCount, end: rightStart, leftSpacer: 0, rightSpacer: 0 };
     }
     const pinnedLeftWidth = widths.slice(0, leftCount).reduce((total, width) => total + width, 0);
@@ -749,7 +916,7 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
       leftSpacer: range.offsetTop,
       rightSpacer: range.offsetBottom,
     };
-  }, [disableVirtualization, disableColumnVirtualization, containerWidth, widths, leftCount, rightStart, scrollLeft, columnBuffer]);
+  }, [disableVirtualization, disableColumnVirtualization, hasColSpan, containerWidth, widths, leftCount, rightStart, scrollLeft, columnBuffer]);
 
   const groupHeaderRows = useMemo(
     () =>
@@ -820,7 +987,7 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     [entries],
   );
 
-  const exportColumns = useMemo(() => visibleUserColumns.filter((column) => column.type !== 'actions'), [visibleUserColumns]);
+  const exportColumns = useMemo(() => visibleUserColumns.filter((column) => column.type !== 'actions' && !column.disableExport), [visibleUserColumns]);
 
   const apiObjectRef = useRef<GridApi | null>(null);
 
@@ -923,7 +1090,7 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
   );
 
   const startRowEdit = useCallback(
-    (id: GridRowId) => {
+    (id: GridRowId, focusField?: string) => {
       const row = rowsById.get(id);
       if (!row) {
         return;
@@ -934,7 +1101,7 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
           values[column.field] = getCellValue(row, column);
         }
       }
-      setEditing({ id, values });
+      setEditing({ id, values, focusField });
       emit('rowEditStart', { id });
     },
     [rowsById, visibleUserColumns, canEditCell, emit],
@@ -956,6 +1123,10 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     };
     if (options?.ignoreModifications) {
       finish();
+      return;
+    }
+    // An invalid value keeps the editor open until it is fixed or cancelled.
+    if (edit.errors && Object.values(edit.errors).some(Boolean)) {
       return;
     }
     const oldRow = rowsById.get(edit.id);
@@ -992,6 +1163,94 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
       committingRef.current = false;
     }
   }, [rowsById, userColumnMap, processRowUpdate, onProcessRowUpdateError, rows, emit]);
+
+  // Controlled edit modes: a changed `rowModesModel` / `cellModesModel` starts or stops edits, and edits started by the user are reported back.
+  const resolveRowId = (key: string): GridRowId | undefined => {
+    for (const id of rowsById.keys()) {
+      if (String(id) === key) {
+        return id;
+      }
+    }
+    return undefined;
+  };
+  useEffect(() => {
+    const model = props.rowModesModel;
+    if (!model) {
+      return;
+    }
+    const current = editingRef.current;
+    for (const [key, entry] of Object.entries(model)) {
+      const id = resolveRowId(key);
+      if (entry.mode === 'edit' && id !== undefined && !(current && current.id === id && current.field === undefined)) {
+        startRowEdit(id, entry.fieldToFocus);
+      }
+    }
+    if (current && current.field === undefined) {
+      const entry = model[current.id];
+      if (entry?.mode === 'view') {
+        void stopEdit({ ignoreModifications: entry.ignoreModifications, reason: 'api' });
+      }
+    }
+    // Only a changed model should act, so an edit the user just started is not undone before the parent catches up.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.rowModesModel]);
+  useEffect(() => {
+    const model = props.cellModesModel;
+    if (!model) {
+      return;
+    }
+    const current = editingRef.current;
+    for (const [key, fields] of Object.entries(model)) {
+      const id = resolveRowId(key);
+      for (const [field, entry] of Object.entries(fields)) {
+        if (entry.mode === 'edit' && id !== undefined && !(current && current.id === id && current.field === field)) {
+          startCellEdit(id, field);
+        }
+      }
+    }
+    if (current && current.field !== undefined) {
+      const entry = model[current.id]?.[current.field];
+      if (entry?.mode === 'view') {
+        void stopEdit({ ignoreModifications: entry.ignoreModifications, reason: 'api' });
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.cellModesModel]);
+  const previousEditRef = useRef<EditState | null>(null);
+  useEffect(() => {
+    const previous = previousEditRef.current;
+    previousEditRef.current = editing;
+    if (previous?.id === editing?.id && previous?.field === editing?.field) {
+      return;
+    }
+    const changes: { edit: EditState; mode: 'view' | 'edit' }[] = [];
+    if (previous) {
+      changes.push({ edit: previous, mode: 'view' });
+    }
+    if (editing) {
+      changes.push({ edit: editing, mode: 'edit' });
+    }
+    const rowModel: GridRowModesModel = { ...props.rowModesModel };
+    const cellModel: GridCellModesModel = { ...props.cellModesModel };
+    let rowChanged = false;
+    let cellChanged = false;
+    for (const { edit, mode } of changes) {
+      if (edit.field === undefined) {
+        rowModel[edit.id] = { mode };
+        rowChanged = true;
+      } else {
+        cellModel[edit.id] = { ...cellModel[edit.id], [edit.field]: { mode } };
+        cellChanged = true;
+      }
+    }
+    if (rowChanged) {
+      props.onRowModesModelChange?.(rowModel);
+    }
+    if (cellChanged) {
+      props.onCellModesModelChange?.(cellModel);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editing]);
 
   const applyColumnOrder = (next: string[]) => {
     setColumnOrder(next);
@@ -1361,6 +1620,8 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
       }
     },
 
+    refetch: () => props.onRefetchRequest?.(),
+
     exportState: () => ({
       sorting: { sortModel },
       filter: { filterModel },
@@ -1401,6 +1662,19 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     },
   };
   apiObjectRef.current = api;
+  const lastEmittedStateRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!props.onStateChange) {
+      return;
+    }
+    const state = api.exportState();
+    const serialized = JSON.stringify(state);
+    // The first run only records the starting state, so the callback reports changes and not the mount.
+    if (lastEmittedStateRef.current !== null && lastEmittedStateRef.current !== serialized) {
+      props.onStateChange(state);
+    }
+    lastEmittedStateRef.current = serialized;
+  });
   useEffect(() => {
     if (apiRef) {
       apiRef.current = api;
@@ -1411,7 +1685,7 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     if (disableColumnSorting || column.sortable === false || SPECIAL_FIELDS.has(column.field) || column.type === 'actions') {
       return;
     }
-    setSortModel(applySortClick(sortModel, column.field, sortingOrder, event.shiftKey && !disableMultipleColumnsSorting));
+    setSortModel(applySortClick(sortModel, column.field, column.sortingOrder ?? sortingOrder, event.shiftKey && !disableMultipleColumnsSorting));
   };
 
   const isSortable = (column: GridColDef<R>) =>
@@ -1676,6 +1950,19 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
         props.onClipboardCopy?.(text);
         break;
       }
+      case 'a':
+      case 'A':
+        if (!(event.ctrlKey || event.metaKey) || !rowSelection || disableMultipleRowSelection || cellSelectionEnabled) {
+          return;
+        }
+        setSelection(selectableIds);
+        break;
+      case 'PageDown':
+      case 'PageUp': {
+        const page = Math.max(1, Math.floor(viewportHeight / (rowHeight ?? 52)) - 1);
+        focusCell(Math.max(0, Math.min(rowEntryIndexes.length - 1, row + (event.key === 'PageDown' ? page : -page))), col);
+        break;
+      }
       case ' ':
         if (entry && rowSelection && isSelectable(entry.node.id, entry.node.row)) {
           toggleSelection(entry.node.id, !selectedSet.has(entry.node.id));
@@ -1714,6 +2001,67 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     }
   }, [focusPosition, range.start, range.end, rowEntryIndexes, offsets, virtualize, colWindow, widths, leftCount, rightStart]);
 
+  // Row spanning: consecutive rows with the same value in a column share one tall cell. Keys are `${rowId}\u0000${field}`.
+  const rowSpans = useMemo(() => {
+    const spans = new Map<string, { count: number; height: number }>();
+    const covered = new Map<string, GridRowId>();
+    if (!rowSpanning) {
+      return { spans, covered };
+    }
+    const comparable = (value: unknown) => (value instanceof Date ? value.getTime() : value);
+    const dataNodes = pageNodes.filter((node) => node.row);
+    for (const column of columns) {
+      if (SPECIAL_FIELDS.has(column.field) || column.type === 'actions') {
+        continue;
+      }
+      const valueAt = (node: GridTreeNode<R>) => {
+        const row = node.row as R;
+        const value = getCellValue(row, column);
+        return comparable(column.rowSpanValueGetter ? column.rowSpanValueGetter(value, row) : value);
+      };
+      let start = 0;
+      for (let index = 1; index <= dataNodes.length; index += 1) {
+        const first = dataNodes[start] as GridTreeNode<R>;
+        const here = dataNodes[index];
+        const firstValue = valueAt(first);
+        const sameRun =
+          here !== undefined &&
+          !detailIds.includes((dataNodes[index - 1] as GridTreeNode<R>).id) &&
+          firstValue != null &&
+          firstValue !== '' &&
+          valueAt(here) === firstValue;
+        if (sameRun) {
+          continue;
+        }
+        const count = index - start;
+        if (count > 1) {
+          const run = dataNodes.slice(start, index);
+          const height =
+            run.reduce((total, node) => total + rowHeightFor(node), 0) -
+            (rowSpacings.get(first.id)?.top ?? 0) -
+            (rowSpacings.get((run[run.length - 1] as GridTreeNode<R>).id)?.bottom ?? 0);
+          spans.set(`${first.id}\u0000${column.field}`, { count, height });
+          for (const node of run.slice(1)) {
+            covered.set(`${node.id}\u0000${column.field}`, first.id);
+          }
+        }
+        start = index;
+      }
+    }
+    return { spans, covered };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rowSpanning, pageNodes, columns, detailIds, rowHeightFor, rowSpacings]);
+  const renderedRowIds = useMemo(() => {
+    const ids = new Set<GridRowId>();
+    for (let index = range.start; index < range.end; index += 1) {
+      const entry = entries[index];
+      if (entry?.kind === 'row') {
+        ids.add(entry.node.id);
+      }
+    }
+    return ids;
+  }, [entries, range.start, range.end]);
+
   /** Renders the cells of one row, leaving out columns scrolled out of view. */
   const renderColumns = (render: (column: GridColDef<R>, index: number) => ReactNode): ReactNode[] => {
     const out: ReactNode[] = [];
@@ -1748,6 +2096,8 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     }
     return out;
   };
+
+  const spanWidth = (index: number, count: number) => widths.slice(index, index + count).reduce((total, width) => total + width, 0);
 
   const cellSx = (index: number, header: boolean) => {
     const column = columns[index] as GridColDef<R>;
@@ -1804,18 +2154,52 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
 
   const renderEditor = (column: GridColDef<R>, node: GridTreeNode<R>, row: R, edit: EditState): ReactNode => {
     const value = edit.values[column.field];
-    const onChange = (next: unknown) =>
-      setEditing((previous) => (previous ? { ...previous, values: { ...previous.values, [column.field]: next } } : previous));
+    const applyEdit = (next: unknown, error?: boolean) =>
+      setEditing((previous) =>
+        previous && previous.id === node.id
+          ? {
+              ...previous,
+              values: { ...previous.values, [column.field]: next },
+              errors: error === undefined ? previous.errors : { ...previous.errors, [column.field]: error },
+            }
+          : previous,
+      );
+    const onChange = (next: unknown) => {
+      const validate = column.preProcessEditCellProps;
+      if (!validate) {
+        applyEdit(next);
+        return;
+      }
+      // Only the latest validation of a field may apply, so a slow async answer cannot overwrite newer input.
+      const token = (validationTokensRef.current[column.field] = (validationTokensRef.current[column.field] ?? 0) + 1);
+      applyEdit(next);
+      const apply = (result: GridEditCellProps) => {
+        if (validationTokensRef.current[column.field] === token) {
+          applyEdit(result.value, Boolean(result.error));
+        }
+      };
+      const result = validate({ id: node.id, row, hasChanged: true, props: { value: next, error: false } });
+      if (result instanceof Promise) {
+        void result.then(apply, () => undefined);
+      } else {
+        apply(result);
+      }
+    };
+    const error = Boolean(edit.errors?.[column.field]);
     const onCommit = (reason?: GridEditStopReason) => void stopEdit({ reason: reason ?? 'enterKeyDown' });
     const onCancel = () => void stopEdit({ ignoreModifications: true });
     if (column.renderEditCell) {
-      return column.renderEditCell({ id: node.id, field: column.field, value, row, colDef: column, onChange, onCommit, onCancel });
+      return column.renderEditCell({ id: node.id, field: column.field, value, row, colDef: column, error, onChange, onCommit, onCancel });
     }
     return (
       <GridCellEditor
         colDef={column}
         value={value}
-        autoFocus={edit.field === column.field || (edit.field === undefined && column.field === Object.keys(edit.values)[0])}
+        error={error}
+        autoFocus={
+          edit.field === column.field ||
+          (edit.field === undefined && column.field === (edit.focusField && edit.focusField in edit.values ? edit.focusField : Object.keys(edit.values)[0]))
+        }
         commitOnBlur={edit.field !== undefined}
         onChange={onChange}
         onCommit={onCommit}
@@ -1828,6 +2212,25 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
     const row = (node.row ?? EMPTY_OBJECT) as R;
     const selected = selectedSet.has(node.id);
     const edit = editing?.id === node.id ? editing : null;
+    const colSpans = new Map<number, number>();
+    const skippedColumns = new Set<number>();
+    if (hasColSpan && node.row) {
+      columns.forEach((column, index) => {
+        if (skippedColumns.has(index) || column.colSpan === undefined || SPECIAL_FIELDS.has(column.field)) {
+          return;
+        }
+        const requested =
+          typeof column.colSpan === 'function' ? column.colSpan(getCellValue(row, column), row, column) : column.colSpan;
+        const regionEnd = index < leftCount ? leftCount : index >= rightStart ? columns.length : rightStart;
+        const span = Math.max(1, Math.min(Math.floor(requested), regionEnd - index));
+        if (span > 1) {
+          colSpans.set(index, span);
+          for (let offset = 1; offset < span; offset += 1) {
+            skippedColumns.add(index + offset);
+          }
+        }
+      });
+    }
     return (
       <TableRow
         key={node.id}
@@ -1898,6 +2301,17 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
         }}
       >
         {renderColumns((column, index) => {
+          if (skippedColumns.has(index)) {
+            return null;
+          }
+          const spanKey = `${node.id}\u0000${column.field}`;
+          const rowSpan = rowSpans.spans.get(spanKey);
+          const coveredBy = rowSpans.covered.get(spanKey);
+          // A covered cell stays as an empty slot while the tall cell above is on screen, and shows its own value when that row scrolled away.
+          if (coveredBy !== undefined && renderedRowIds.has(coveredBy)) {
+            return <TableCell key={column.field} role="presentation" aria-hidden sx={{ ...cellSx(index, false), p: 0, borderBottom: 0 }} />;
+          }
+          const colSpanCount = colSpans.get(index) ?? 1;
           const editingCell = edit !== null && column.field in edit.values && isEditable(column, node);
           const selectedCell = cellSelectionEnabled && Boolean(cellSelection[node.id]?.[column.field]);
           const selectable = cellSelectionEnabled && rowIndex !== null && !SPECIAL_FIELDS.has(column.field) && !editingCell;
@@ -1912,7 +2326,20 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
               data-rowindex={rowIndex ?? undefined}
               data-colindex={index}
               aria-colindex={index + 1}
-              className={node.row && getCellClassName && !SPECIAL_FIELDS.has(column.field) ? getCellClassName(getCellParams(node.id, row, column)) : undefined}
+              aria-colspan={colSpanCount > 1 ? colSpanCount : undefined}
+              aria-rowspan={rowSpan?.count}
+              className={
+                node.row && !SPECIAL_FIELDS.has(column.field)
+                  ? [
+                      typeof column.cellClassName === 'function'
+                        ? column.cellClassName(getCellParams(node.id, row, column))
+                        : column.cellClassName,
+                      getCellClassName?.(getCellParams(node.id, row, column)),
+                    ]
+                      .filter(Boolean)
+                      .join(' ') || undefined
+                  : undefined
+              }
               aria-selected={cellSelectionEnabled && !SPECIAL_FIELDS.has(column.field) ? selectedCell : undefined}
               onMouseDown={selectable ? (event) => handleCellMouseDown(event, node.id, rowIndex, index, column.field) : undefined}
               onMouseEnter={selectable ? () => extendCellDrag(rowIndex, index) : undefined}
@@ -1927,6 +2354,18 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
               }}
               sx={{
                 ...cellSx(index, false),
+                ...(colSpanCount > 1 && {
+                  width: spanWidth(index, colSpanCount),
+                  minWidth: spanWidth(index, colSpanCount),
+                  maxWidth: spanWidth(index, colSpanCount),
+                }),
+                ...(rowSpan && {
+                  height: rowSpan.height,
+                  alignSelf: 'flex-start',
+                  bgcolor: 'background.paper',
+                  zIndex: index < leftCount || index >= rightStart ? 3 : 1,
+                  borderBottom: '1px solid var(--DnaDataGrid-border)',
+                }),
                 outlineOffset: -2,
                 '&:focus-visible': { outline: '2px solid', outlineColor: 'primary.main' },
                 ...(cellSelectionEnabled && { userSelect: 'none' }),
@@ -1963,6 +2402,8 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
         role="columnheader"
         aria-colindex={index + 1}
         aria-sort={direction === 'asc' ? 'ascending' : direction === 'desc' ? 'descending' : undefined}
+        className={column.headerClassName}
+        title={column.description}
         draggable={reorderable}
         onDragStart={reorderable ? () => (dragFieldRef.current = column.field) : undefined}
         onDragOver={reorderable ? (event) => event.preventDefault() : undefined}
@@ -1986,6 +2427,7 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
             <TableSortLabel
               active={Boolean(direction)}
               direction={direction === 'desc' ? 'desc' : 'asc'}
+              hideSortIcon={column.hideSortIcons}
               sx={{ ...ellipsisSx, maxWidth: '100%', flexDirection: headerAlign === 'right' ? 'row-reverse' : 'row' }}
             >
               {content}
@@ -2164,7 +2606,7 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
         (LoadingOverlay ? (
           <LoadingOverlay localeText={localeText} {...slotProps?.loadingOverlay} />
         ) : (
-          <LinearProgress aria-label={localeText.loadingLabel} sx={{ position: 'absolute', left: 0, right: 0, top: 0, zIndex: 5 }} />
+          <GridLoadingIndicator variant={loadingVariant} label={localeText.loadingLabel} />
         ))}
       <TableContainer
         ref={scrollerRef}
@@ -2190,7 +2632,7 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
         >
           <TableHead sx={{ position: 'sticky', top: 0, zIndex: 3, bgcolor: 'background.paper' }}>
             {groupHeaderRows.map((cells, level) => (
-              <TableRow key={`group-${level}`} sx={{ height: headerHeight }}>
+              <TableRow key={`group-${level}`} sx={{ height: props.columnGroupHeaderHeight ?? headerHeight }}>
                 {cells.map((cell) => {
                   const spanWidth = widths.slice(cell.startIndex, cell.startIndex + cell.span).reduce((total, width) => total + width, 0);
                   return (
@@ -2320,4 +2762,71 @@ export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props:
       )}
     </Paper>
   );
+}
+
+/** Keeps the sort, filter and page models, and loads `rows` and `rowCount` from the data source whenever one of them changes. */
+function DataSourceGrid<R extends GridValidRowModel>(props: DataGridProps<R> & { dataSource: GridDataSource<R> }) {
+  const { dataSource, initialState, pageSizeOptions = DEFAULT_PAGE_SIZE_OPTIONS } = props;
+  const [sortModel, setSortModel] = useGridState(props.sortModel, initialState?.sorting?.sortModel ?? [], props.onSortModelChange);
+  const [filterModel, setFilterModel] = useGridState(
+    props.filterModel,
+    initialState?.filter?.filterModel ?? DEFAULT_FILTER_MODEL,
+    props.onFilterModelChange,
+  );
+  const [paginationModel, setPaginationModel] = useGridState(
+    props.paginationModel,
+    initialState?.pagination?.paginationModel ?? { page: 0, pageSize: pageSizeValue(pageSizeOptions[0] ?? 10) },
+    props.onPaginationModelChange,
+  );
+  const [result, setResult] = useState<{ rows: R[]; rowCount: number }>({ rows: [], rowCount: 0 });
+  const [loading, setLoading] = useState(true);
+  const [refetchTick, setRefetchTick] = useState(0);
+  const requestRef = useRef(0);
+  const dataSourceRef = useRef(dataSource);
+  dataSourceRef.current = dataSource;
+
+  useEffect(() => {
+    const request = (requestRef.current += 1);
+    const params = { sortModel, filterModel, paginationModel };
+    setLoading(true);
+    dataSourceRef.current.getRows(params).then(
+      (next) => {
+        if (request === requestRef.current) {
+          setResult(next);
+          setLoading(false);
+        }
+      },
+      (error: unknown) => {
+        if (request === requestRef.current) {
+          setLoading(false);
+          dataSourceRef.current.onError?.(error, params);
+        }
+      },
+    );
+  }, [sortModel, filterModel, paginationModel, refetchTick]);
+
+  const refetch = useCallback(() => setRefetchTick((tick) => tick + 1), []);
+
+  return (
+    <DataGridBase<R>
+      {...props}
+      rows={result.rows}
+      rowCount={result.rowCount}
+      loading={props.loading || loading}
+      sortModel={sortModel}
+      onSortModelChange={setSortModel}
+      filterModel={filterModel}
+      onFilterModelChange={setFilterModel}
+      paginationModel={paginationModel}
+      onPaginationModelChange={setPaginationModel}
+      sortingMode="server"
+      filterMode="server"
+      paginationMode="server"
+      onRefetchRequest={refetch}
+    />
+  );
+}
+
+export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props: DataGridProps<R>) {
+  return props.dataSource ? <DataSourceGrid<R> {...props} dataSource={props.dataSource} /> : <DataGridBase<R> {...props} />;
 }

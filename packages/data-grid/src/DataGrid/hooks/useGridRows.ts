@@ -49,6 +49,7 @@ export interface UseGridRowsResult<R extends GridValidRowModel> {
   /** Nodes on the current page, in display order, with expanded descendants included. */
   pageNodes: GridTreeNode<R>[];
   /** Top level nodes after filtering and sorting, before pagination. */
+  roots: GridTreeNode<R>[];
   rootCount: number;
   page: number;
   /** Every data row that passes the filters, in display order with all groups expanded. */
@@ -163,6 +164,7 @@ export function useGridRows<R extends GridValidRowModel>(params: UseGridRowsPara
 
   return {
     pageNodes,
+    roots,
     rootCount: roots.length,
     page: currentPage,
     filteredRows,

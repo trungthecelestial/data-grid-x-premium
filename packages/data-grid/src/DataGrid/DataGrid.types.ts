@@ -90,6 +90,8 @@ export interface GridRenderEditCellParams<R extends GridValidRowModel = GridVali
   value: unknown;
   row: R;
   colDef: GridColDef<R>;
+  /** True while `preProcessEditCellProps` flags the value as invalid. */
+  error?: boolean;
   onChange: (value: unknown) => void;
   /** Saves the edit. */
   onCommit: () => void;
@@ -126,11 +128,30 @@ export interface GridColDef<R extends GridValidRowModel = GridValidRowModel> {
   /** Set to false to keep the column out of the pin actions of its menu. */
   pinnable?: boolean;
   resizable?: boolean;
+  /** Class name added to the column header cell. */
+  headerClassName?: string;
+  /** Class name added to every cell of the column. */
+  cellClassName?: string | ((params: GridCellParams<R>) => string);
+  /** Tooltip shown on the column header. */
+  description?: string;
+  /** Hides the sort arrow until the column is sorted. */
+  hideSortIcons?: boolean;
+  /** Leaves the column out of CSV, Excel, print and copy output. */
+  disableExport?: boolean;
   /** Prevents the column from being dragged to a new position. */
   disableReorder?: boolean;
   /** Hides the menu button in this column's header. */
   disableColumnMenu?: boolean;
   editable?: boolean;
+  /** Runs on every edit change. Return `{ value, error: true }` to reject the value, or change the value. May be async. */
+  preProcessEditCellProps?: (params: GridPreProcessEditCellPropsParams<R>) => GridEditCellProps | Promise<GridEditCellProps>;
+  /**
+   * Merges this cell with the next columns of its row. Pass the number of columns or a function of the cell.
+   * Spans stop at the border of the pinned areas. Column virtualization is off while any column has a `colSpan`.
+   */
+  colSpan?: number | ((value: any, row: R, column: GridColDef<R>) => number);
+  /** Value compared between consecutive rows when `rowSpanning` is on. Defaults to the cell value. */
+  rowSpanValueGetter?: (value: any, row: R) => unknown;
   /** Options of a `singleSelect` column. */
   valueOptions?: readonly (string | number | GridValueOption)[];
   valueGetter?: (value: any, row: R) => unknown;
@@ -140,6 +161,10 @@ export interface GridColDef<R extends GridValidRowModel = GridValidRowModel> {
   /** Writes an edited value into a copy of the row. */
   valueSetter?: (value: any, row: R) => R;
   sortComparator?: (v1: any, v2: any, row1: R, row2: R) => number;
+  /** Builds the comparator for one direction. It must apply the direction itself, so it wins over `sortComparator`. */
+  getSortComparator?: (direction: 'asc' | 'desc') => ((v1: any, v2: any, row1: R, row2: R) => number) | undefined;
+  /** Order a header click cycles through for this column. Defaults to the grid's `sortingOrder`. */
+  sortingOrder?: readonly GridSortDirection[];
   filterOperators?: readonly GridFilterOperator<R>[];
   renderCell?: (params: GridRenderCellParams<R>) => ReactNode;
   renderHeader?: (params: { colDef: GridColDef<R> }) => ReactNode;
@@ -149,6 +174,43 @@ export interface GridColDef<R extends GridValidRowModel = GridValidRowModel> {
   /** Actions shown in a `actions` column. */
   getActions?: (params: { id: GridRowId; row: R; field: string }) => ReactNode[];
 }
+
+export interface GridEditCellProps {
+  value: unknown;
+  /** Set to true to mark the value invalid. The edit then cannot be saved. */
+  error?: boolean;
+}
+
+export interface GridPreProcessEditCellPropsParams<R extends GridValidRowModel = GridValidRowModel> {
+  id: GridRowId;
+  row: R;
+  /** The value being edited and its error state so far. */
+  props: GridEditCellProps;
+  hasChanged: boolean;
+}
+
+export interface GridEditModeEntry {
+  mode: 'view' | 'edit';
+  /** With `view`: discard the pending edit instead of saving it. */
+  ignoreModifications?: boolean;
+  /** With `edit` in row mode: the field that gets the focus. */
+  fieldToFocus?: string;
+}
+
+/** `{ [rowId]: { mode } }`, for `editMode="row"`. */
+export type GridRowModesModel = Record<GridRowId, GridEditModeEntry>;
+
+/** `{ [rowId]: { [field]: { mode } } }`, for `editMode="cell"`. */
+export type GridCellModesModel = Record<GridRowId, Record<string, GridEditModeEntry>>;
+
+export interface GridRowSelectionPropagation {
+  /** Selecting a parent or group selects every row below it. */
+  descendants?: boolean;
+  /** A parent row is selected when all its children are, and unselected when one is not. */
+  parents?: boolean;
+}
+
+export type GridLoadingVariant = 'linear-progress' | 'circular-progress' | 'skeleton';
 
 export interface GridRowParams<R extends GridValidRowModel = GridValidRowModel> {
   id: GridRowId;
@@ -518,6 +580,9 @@ export interface GridApi {
   scrollToIndexes: (params: GridScrollToIndexesParams) => void;
   setCellFocus: (id: GridRowId, field: string) => void;
 
+  /** Fetches the rows again through `dataSource`. */
+  refetch: () => void;
+
   /** Snapshot of the sorting, filter, pagination, column, density, selection, aggregation and grouping state. */
   exportState: () => GridInitialState;
   restoreState: (state: GridInitialState) => void;
@@ -527,9 +592,34 @@ export interface GridApi {
 
 export type GridApiRef = MutableRefObject<GridApi>;
 
+export interface GridDataSourceGetRowsParams {
+  sortModel: GridSortModel;
+  filterModel: GridFilterModel;
+  paginationModel: GridPaginationModel;
+}
+
+export interface GridDataSourceGetRowsResult<R extends GridValidRowModel = GridValidRowModel> {
+  rows: R[];
+  /** Total number of rows on the server, across all pages. */
+  rowCount: number;
+}
+
+/** Loads rows from a server. Sorting, filtering and pagination then run on the server. */
+export interface GridDataSource<R extends GridValidRowModel = GridValidRowModel> {
+  getRows: (params: GridDataSourceGetRowsParams) => Promise<GridDataSourceGetRowsResult<R>>;
+  /** Called when `getRows` rejects. */
+  onError?: (error: unknown, params: GridDataSourceGetRowsParams) => void;
+}
+
 export interface DataGridProps<R extends GridValidRowModel = GridValidRowModel> {
+  /** Ignored when `dataSource` is set. */
   rows: readonly R[];
   columns: readonly GridColDef<R>[];
+  /**
+   * Fetches `rows` and `rowCount` for the current sort, filter and page, and again whenever one of them changes.
+   * Turns sorting, filtering and pagination to `server` mode. Results of stale requests are dropped.
+   */
+  dataSource?: GridDataSource<R>;
   /** Returns the unique id of a row. Defaults to `row.id`. */
   getRowId?: (row: R) => GridRowId;
   apiRef?: GridApiRef;
@@ -545,6 +635,8 @@ export interface DataGridProps<R extends GridValidRowModel = GridValidRowModel> 
   onDensityChange?: (density: GridDensity) => void;
   rowHeight?: number;
   columnHeaderHeight?: number;
+  /** Height of the column group header rows in px. Defaults to `columnHeaderHeight`. */
+  columnGroupHeaderHeight?: number;
   /** Renders every row instead of only the ones in view. */
   disableVirtualization?: boolean;
   /** Extra rows rendered above and below the viewport. Defaults to 3. */
@@ -572,6 +664,12 @@ export interface DataGridProps<R extends GridValidRowModel = GridValidRowModel> 
   hideFooter?: boolean;
 
   checkboxSelection?: boolean;
+  /** How selection moves through tree data and row groups. Off by default. */
+  rowSelectionPropagation?: GridRowSelectionPropagation;
+  /** Allows one selected row at a time: no header checkbox, no Shift/Ctrl multi-select. */
+  disableMultipleRowSelection?: boolean;
+  /** Look of the default loading indicator. Defaults to `linear-progress`. */
+  loadingVariant?: GridLoadingVariant;
   /** Defaults to true. */
   rowSelection?: boolean;
   disableRowSelectionOnClick?: boolean;
@@ -586,6 +684,8 @@ export interface DataGridProps<R extends GridValidRowModel = GridValidRowModel> 
   columnGroupingModel?: GridColumnGroupingModel;
   onColumnWidthChange?: (params: { field: string; width: number }) => void;
   onColumnOrderChange?: (fields: string[]) => void;
+  /** Called with the exported state whenever sorting, filtering, pagination, columns, density, selection, aggregation or grouping change. */
+  onStateChange?: (state: GridInitialState) => void;
   disableColumnSorting?: boolean;
   disableColumnFilter?: boolean;
   disableColumnResize?: boolean;
@@ -622,6 +722,14 @@ export interface DataGridProps<R extends GridValidRowModel = GridValidRowModel> 
   onRowOrderChange?: (params: { row: R; oldIndex: number; targetIndex: number }) => void;
 
   editMode?: 'cell' | 'row';
+  /** Controls which rows are in edit mode with `editMode="row"`. */
+  rowModesModel?: GridRowModesModel;
+  onRowModesModelChange?: (model: GridRowModesModel) => void;
+  /** Controls which cells are in edit mode with `editMode="cell"`. */
+  cellModesModel?: GridCellModesModel;
+  onCellModesModelChange?: (model: GridCellModesModel) => void;
+  /** Merges cells that hold the same value in consecutive rows into one tall cell. Rows with an open detail panel end a merge. */
+  rowSpanning?: boolean;
   /** Called with the edited row before it is committed. Return the row to keep, or throw to reject. */
   processRowUpdate?: (newRow: R, oldRow: R) => R | Promise<R>;
   onProcessRowUpdateError?: (error: unknown) => void;
@@ -631,6 +739,13 @@ export interface DataGridProps<R extends GridValidRowModel = GridValidRowModel> 
   slots?: GridSlots;
 
   treeData?: boolean;
+  /**
+   * Total number of children of a tree data row. A row with more children than are loaded shows an expander,
+   * and `onFetchChildren` is called when it is expanded.
+   */
+  getChildrenCount?: (row: R) => number;
+  /** Called once per row when it is expanded and `getChildrenCount` says children are missing. Add them to `rows` when they arrive. */
+  onFetchChildren?: (params: { id: GridRowId; row: R }) => void | Promise<void>;
   getTreeDataPath?: (row: R) => string[];
   /** Expansion depth of groups on first render. `-1` expands everything. Defaults to 0. */
   defaultGroupingExpansionDepth?: number;

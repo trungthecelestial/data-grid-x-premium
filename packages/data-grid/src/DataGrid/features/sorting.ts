@@ -61,18 +61,25 @@ export function getRowComparator<R extends GridValidRowModel>(
 ): ((a: R, b: R) => number) | null {
   const active = model.flatMap((item) => {
     const column = columns.get(item.field);
-    return column && item.sort ? [{ column, direction: item.sort === 'desc' ? -1 : 1 }] : [];
+    if (!column || !item.sort) {
+      return [];
+    }
+    // A comparator from `getSortComparator` already accounts for the direction.
+    const custom = column.getSortComparator?.(item.sort === 'desc' ? 'desc' : 'asc');
+    return [{ column, custom, direction: custom ? 1 : item.sort === 'desc' ? -1 : 1 }];
   });
   if (active.length === 0) {
     return null;
   }
   return (a, b) => {
-    for (const { column, direction } of active) {
+    for (const { column, custom, direction } of active) {
       const valueA = getCellValue(a, column);
       const valueB = getCellValue(b, column);
-      const result = column.sortComparator
-        ? column.sortComparator(valueA, valueB, a, b)
-        : compareValues(valueA, valueB);
+      const result = custom
+        ? custom(valueA, valueB, a, b)
+        : column.sortComparator
+          ? column.sortComparator(valueA, valueB, a, b)
+          : compareValues(valueA, valueB);
       if (result !== 0) {
         return result * direction;
       }
