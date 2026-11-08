@@ -25,6 +25,7 @@ import { alpha, darken, lighten, type Theme } from '@mui/material/styles';
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -33,13 +34,15 @@ import {
   type DragEvent,
   type KeyboardEvent,
   type MouseEvent,
+  type MutableRefObject,
   type PointerEvent,
   type ReactNode,
   type ClipboardEvent,
   type UIEvent,
 } from 'react';
 import { GridCellEditor } from './components/GridCellEditor';
-import { GridColumnMenu, getAvailableAggregationFunctions } from './components/GridColumnMenu';
+import { GridColumnMenu } from './components/GridColumnMenu';
+import { GridPivotPanel } from './components/GridPivotPanel';
 import { GridColumnsPanel } from './components/GridColumnsPanel';
 import { GridFilterPanel } from './components/GridFilterPanel';
 import { GridHeaderFilterCell } from './components/GridHeaderFilterCell';
@@ -61,6 +64,8 @@ import type {
   GridEventName,
   GridFilterModel,
   GridFilterPanelSlotProps,
+  GridPivotModel,
+  GridPivotPanelSlotProps,
   GridInitialState,
   GridPaginationModel,
   GridPinnedColumns,
@@ -78,7 +83,13 @@ import type {
   GridToolbarProps,
   GridValidRowModel,
 } from './DataGrid.types';
-import { formatAggregate } from './features/aggregation';
+import {
+  formatAggregate,
+  getAggregationLabel,
+  getAvailableAggregationFunctions,
+  GRID_AGGREGATION_FUNCTIONS,
+} from './features/aggregation';
+import { computePivot, EMPTY_PIVOT_MODEL, isPivotModelEmpty, PIVOT_ROW_ID, PIVOT_ROW_PATH, type GridPivotResult } from './features/pivot';
 import { computeAutosizeWidths } from './features/autosize';
 import {
   buildGroupHeaderRows,
@@ -93,12 +104,13 @@ import {
 import { parseClipboardText, parsePastedValue, SKIP_PASTE } from './features/clipboard';
 import { buildCsv, buildPrintHtml, downloadFile, printHtml } from './features/export';
 import { buildXlsx, XLSX_MIME_TYPE } from './features/xlsx';
-import { countActiveFilters, getColumnFilterOperators, getInitialFilterValue, isFilterable } from './features/filtering';
+import { countActiveFilters, getColumnFilterOperators, getFilterPredicate, getInitialFilterValue, isFilterable } from './features/filtering';
 import { applySortClick, DEFAULT_SORTING_ORDER } from './features/sorting';
 import { collectRows, type GridTreeNode } from './features/tree';
 import { useElementSize } from './hooks/useElementSize';
 import { useGridRows } from './hooks/useGridRows';
 import { useGridState } from './hooks/useGridState';
+import { useMeasuredRowHeights } from './hooks/useMeasuredRowHeights';
 import { getOffsets, getVirtualRange } from './hooks/virtualization';
 import { DEFAULT_LOCALE_TEXT } from './localeText';
 
@@ -145,6 +157,7 @@ const getBorderVariables = (theme: Theme) => {
 const defaultGetRowId =(row: GridValidRowModel): GridRowId => row.id;
 
 const ellipsisSx = { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } as const;
+const wrappingTextSx = { whiteSpace: 'normal', overflowWrap: 'anywhere' } as const;
 
 const JUSTIFY = { left: 'flex-start', center: 'center', right: 'flex-end' } as const;
 
@@ -203,7 +216,23 @@ function GridLoadingIndicator({ variant, label }: { variant: GridLoadingVariant;
   return <LinearProgress aria-label={label} sx={{ position: 'absolute', left: 0, right: 0, top: 0, zIndex: 5 }} />;
 }
 
-type DataGridBaseProps<R extends GridValidRowModel> = DataGridProps<R> & { onRefetchRequest?: () => void };
+/** What the pivot layer above the grid hands down. Only present where pivoting is available. */
+interface GridPivoting<R extends GridValidRowModel> {
+  /** The user's on/off choice. */
+  enabled: boolean;
+  /** True while the grid is showing generated rows and columns. */
+  applied: boolean;
+  model: GridPivotModel;
+  setEnabled: (enabled: boolean) => void;
+  setModel: (model: GridPivotModel) => void;
+  sourceColumns: readonly GridColDef<R>[];
+  totals: Record<string, unknown> | null;
+  rowLabelColumn: GridColDef<R> | null;
+  /** Receives the rows with runtime edits applied, so pivoting starts from what the user sees. */
+  sourceRowsRef: MutableRefObject<{ source: readonly R[]; rows: readonly R[] } | null>;
+}
+
+type DataGridBaseProps<R extends GridValidRowModel> = DataGridProps<R> & { onRefetchRequest?: () => void; pivoting?: GridPivoting<R> };
 
 function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: DataGridBaseProps<R>) {
   const {
@@ -260,6 +289,9 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     getRowClassName,
     getCellClassName,
     getRowHeight,
+    getEstimatedRowHeight,
+    pivoting,
+    aggregationFunctions = GRID_AGGREGATION_FUNCTIONS,
     isCellEditable,
     slotProps,
     hideFooterPagination = false,
@@ -337,7 +369,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     props.onDetailPanelExpandedRowIdsChange as ((ids: readonly GridRowId[]) => void) | undefined,
   );
 
-  const [aggregationModel, setAggregationModel] = useGridState<GridAggregationModel>(
+  const [storedAggregationModel, setAggregationModel] = useGridState<GridAggregationModel>(
     props.aggregationModel,
     initialState?.aggregation?.model ?? EMPTY_OBJECT,
     props.onAggregationModelChange,
@@ -348,7 +380,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     props.onRowGroupingModelChange as ((model: readonly string[]) => void) | undefined,
   );
   const [columnMenu, setColumnMenu] = useState<{ field: string; anchor: HTMLElement } | null>(null);
-  const [menuPanel, setMenuPanel] = useState<{ kind: 'filter' | 'columns'; anchor: HTMLElement } | null>(null);
+  const [menuPanel, setMenuPanel] = useState<{ kind: 'filter' | 'columns' | 'pivot'; anchor: HTMLElement } | null>(null);
 
   const [columnOrder, setColumnOrder] = useState<string[]>(
     () => initialState?.columns?.orderedFields ?? userColumns.map((column) => column.field),
@@ -431,6 +463,11 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     return result;
   }, [rows, rowUpdates, rowOrder, getRowId]);
 
+  const isPivoted = pivoting?.applied ?? false;
+  if (pivoting && !isPivoted) {
+    pivoting.sourceRowsRef.current = { source: rows, rows: mergedRows };
+  }
+
   const rowsById = useMemo(() => new Map(mergedRows.map((row) => [getRowId(row), row])), [mergedRows, getRowId]);
 
   const canReorder =
@@ -464,12 +501,25 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     [userColumns],
   );
 
+  // Models can name functions that are not registered or columns that opted out, and those simply do not aggregate.
+  const aggregationModel = useMemo<GridAggregationModel>(
+    () =>
+      Object.fromEntries(
+        Object.entries(storedAggregationModel).filter(([field, fn]) => aggregationFunctions[fn] && userColumnMap.get(field)?.aggregable !== false),
+      ),
+    [storedAggregationModel, aggregationFunctions, userColumnMap],
+  );
+
   const effectiveVisibility = useMemo(
     () => ({ ...Object.fromEntries(rowGroupingModel.map((field) => [field, false])), ...visibilityModel }),
     [rowGroupingModel, visibilityModel],
   );
 
-  const orderedFields = useMemo(() => reconcileOrder(columnOrder, userColumns), [columnOrder, userColumns]);
+  // Generated columns follow the pivot model. The order the user chose for the source columns waits for when pivoting ends.
+  const orderedFields = useMemo(
+    () => (isPivoted ? userColumns.map((column) => column.field) : reconcileOrder(columnOrder, userColumns)),
+    [isPivoted, columnOrder, userColumns],
+  );
 
   const visibleUserColumns = useMemo(
     () =>
@@ -499,11 +549,19 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
       paginationMode,
       page: paginationModel.page,
       pageSize: paginationModel.pageSize,
-      aggregationModel,
+      // Pivot cells arrive aggregated. Aggregating the generated rows again would give wrong totals.
+      aggregationModel: isPivoted ? EMPTY_OBJECT : aggregationModel,
+      aggregationFunctions,
     },
   );
 
   const nodeById = useMemo(() => new Map(pageNodes.map((node) => [node.id, node])), [pageNodes]);
+
+  const isAutoHeightRow = useCallback(
+    (node: GridTreeNode<R>) => Boolean(node.row && getRowHeight?.({ id: node.id, row: node.row }) === 'auto'),
+    [getRowHeight],
+  );
+  const hasAutoHeightRows = useMemo(() => pageNodes.some(isAutoHeightRow), [pageNodes, isAutoHeightRow]);
 
   const selectedSet = useMemo(() => new Set(selection), [selection]);
   const isSelectable = useCallback(
@@ -899,8 +957,9 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
   const hasColSpan = useMemo(() => columns.some((column) => column.colSpan !== undefined), [columns]);
 
   // Columns scrolled out of view are not rendered. Pinned columns always are, and spacers stand in for the skipped middle columns.
+  // Rows sized by their content need every cell rendered, or scrolling sideways would change their height.
   const colWindow = useMemo(() => {
-    if (disableVirtualization || disableColumnVirtualization || hasColSpan || containerWidth === 0 || rightStart <= leftCount) {
+    if (disableVirtualization || disableColumnVirtualization || hasColSpan || hasAutoHeightRows || containerWidth === 0 || rightStart <= leftCount) {
       return { start: leftCount, end: rightStart, leftSpacer: 0, rightSpacer: 0 };
     }
     const pinnedLeftWidth = widths.slice(0, leftCount).reduce((total, width) => total + width, 0);
@@ -916,7 +975,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
       leftSpacer: range.offsetTop,
       rightSpacer: range.offsetBottom,
     };
-  }, [disableVirtualization, disableColumnVirtualization, hasColSpan, containerWidth, widths, leftCount, rightStart, scrollLeft, columnBuffer]);
+  }, [disableVirtualization, disableColumnVirtualization, hasColSpan, hasAutoHeightRows, containerWidth, widths, leftCount, rightStart, scrollLeft, columnBuffer]);
 
   const groupHeaderRows = useMemo(
     () =>
@@ -945,15 +1004,31 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     return map;
   }, [getRowSpacing, pageNodes]);
 
+  const slotHeightRef = useRef<(id: GridRowId) => number | undefined>(() => undefined);
+  const { measuredHeights, getRowRef, measureRows, resetHeights } = useMeasuredRowHeights(scrollerRef, slotHeightRef, setScrollTop);
+
   // The height of a row's slot: the row itself plus the space above and below it.
   const rowHeightFor = useCallback(
     (node: GridTreeNode<R>) => {
-      const height = (node.row && getRowHeight ? getRowHeight({ id: node.id, row: node.row }) : null) ?? rowHeight;
+      const requested = node.row && getRowHeight ? getRowHeight({ id: node.id, row: node.row }) : null;
       const spacing = rowSpacings.get(node.id) ?? NO_SPACING;
-      return height + spacing.top + spacing.bottom;
+      if (requested === 'auto') {
+        // A measured row was measured with its spacing, which is part of the row element.
+        const measured = measuredHeights.get(node.id);
+        if (measured !== undefined) {
+          return measured;
+        }
+        const estimate = node.row ? getEstimatedRowHeight?.({ id: node.id, row: node.row }) : null;
+        return (estimate ?? rowHeight) + spacing.top + spacing.bottom;
+      }
+      return (requested ?? rowHeight) + spacing.top + spacing.bottom;
     },
-    [getRowHeight, rowHeight, rowSpacings],
+    [getRowHeight, getEstimatedRowHeight, measuredHeights, rowHeight, rowSpacings],
   );
+  slotHeightRef.current = (id) => {
+    const node = nodeById.get(id);
+    return node ? rowHeightFor(node) : undefined;
+  };
 
   const entries = useMemo(() => {
     const result: Entry<R>[] = [];
@@ -982,12 +1057,18 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     [virtualize, offsets, scrollTop, viewportHeight, rowBufferCount, entries.length],
   );
 
+  useLayoutEffect(measureRows, [measureRows, range.start, range.end, entries, widths, measuredHeights]);
+
   const rowEntryIndexes = useMemo(
     () => entries.flatMap((entry, index) => (entry.kind === 'row' ? [index] : [])),
     [entries],
   );
 
-  const exportColumns = useMemo(() => visibleUserColumns.filter((column) => column.type !== 'actions' && !column.disableExport), [visibleUserColumns]);
+  const pivotLabelColumn = pivoting?.rowLabelColumn;
+  const exportColumns = useMemo(
+    () => [...(pivotLabelColumn ? [pivotLabelColumn] : []), ...visibleUserColumns.filter((column) => column.type !== 'actions' && !column.disableExport)],
+    [visibleUserColumns, pivotLabelColumn],
+  );
 
   const apiObjectRef = useRef<GridApi | null>(null);
 
@@ -1577,6 +1658,11 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
 
     setAggregationModel,
     setRowGroupingModel: (model) => setRowGroupingModel(model),
+    isPivotActive: () => pivoting?.enabled ?? false,
+    setPivotActive: (active) => pivoting?.setEnabled(active),
+    getPivotModel: () => pivoting?.model ?? EMPTY_PIVOT_MODEL,
+    setPivotModel: (model) => pivoting?.setModel(model),
+    resetRowHeights: resetHeights,
     toggleDetailPanel: toggleDetail,
     getExpandedDetailPanels: () => [...detailIds],
     setRowChildrenExpansion: (id, isExpandedValue) => setExpansion((previous) => new Map(previous).set(id, isExpandedValue)),
@@ -1634,8 +1720,9 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
       pinnedColumns: pinned,
       density,
       rowSelection: selection,
-      aggregation: { model: aggregationModel },
-      rowGrouping: { model: [...rowGroupingModel] },
+      // While pivoting these hold generated values. The user's own stay in place for when pivoting ends.
+      ...(isPivoted ? {} : { aggregation: { model: aggregationModel }, rowGrouping: { model: [...rowGroupingModel] } }),
+      ...(pivoting ? { pivoting: { enabled: pivoting.enabled, model: pivoting.model } } : {}),
     }),
     restoreState: (state: GridInitialState) => {
       if (state.sorting?.sortModel) setSortModel(state.sorting.sortModel);
@@ -1651,6 +1738,8 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
       if (state.rowSelection) setSelection(state.rowSelection);
       if (state.aggregation?.model) setAggregationModel(state.aggregation.model);
       if (state.rowGrouping?.model) setRowGroupingModel([...state.rowGrouping.model]);
+      if (state.pivoting?.enabled !== undefined) pivoting?.setEnabled(state.pivoting.enabled);
+      if (state.pivoting?.model) pivoting?.setModel(state.pivoting.model);
     },
     subscribeEvent: (event, handler) => {
       const listeners = listenersRef.current.get(event) ?? new Set<EventListener>();
@@ -1734,7 +1823,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
       return null;
     }
     const { field, anchor } = columnMenu;
-    const aggregationFunctions = disableAggregation ? [] : getAvailableAggregationFunctions(column);
+    const availableFunctions = disableAggregation ? [] : getAvailableAggregationFunctions(column, aggregationFunctions);
     return (
       <ColumnMenu
           {...slotProps?.columnMenu}
@@ -1745,8 +1834,9 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
         sortDirection={sortModel.find((item) => item.field === field)?.sort}
         onSort={isSortable(column) ? (direction) => setSortModel(direction ? [{ field, sort: direction }] : sortModel.filter((item) => item.field !== field)) : undefined}
         onFilter={!disableColumnFilter && isFilterable(column) ? () => openFilterFor(column, anchor) : undefined}
-        aggregationFunctions={aggregationFunctions}
+        aggregationFunctions={availableFunctions}
         aggregation={aggregationModel[field]}
+        getAggregationFunctionLabel={(fn) => getAggregationLabel(fn, aggregationFunctions, localeText)}
         onAggregationChange={(fn) => {
           const { [field]: _removed, ...rest } = aggregationModel;
           setAggregationModel(fn ? { ...rest, [field]: fn } : rest);
@@ -2026,6 +2116,8 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
         const firstValue = valueAt(first);
         const sameRun =
           here !== undefined &&
+          !isAutoHeightRow(first) &&
+          !isAutoHeightRow(here) &&
           !detailIds.includes((dataNodes[index - 1] as GridTreeNode<R>).id) &&
           firstValue != null &&
           firstValue !== '' &&
@@ -2050,7 +2142,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     }
     return { spans, covered };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rowSpanning, pageNodes, columns, detailIds, rowHeightFor, rowSpacings]);
+  }, [rowSpanning, pageNodes, columns, detailIds, rowHeightFor, rowSpacings, isAutoHeightRow]);
   const renderedRowIds = useMemo(() => {
     const ids = new Set<GridRowId>();
     for (let index = range.start; index < range.end; index += 1) {
@@ -2121,7 +2213,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     } as const;
   };
 
-  const renderValue = (column: GridColDef<R>, node: GridTreeNode<R>, row: R): ReactNode => {
+  const renderValue = (column: GridColDef<R>, node: GridTreeNode<R>, row: R, wrapText: boolean): ReactNode => {
     const id = node.id;
     if (column.type === 'actions' && column.getActions) {
       return column.getActions({ id, row, field: column.field });
@@ -2132,7 +2224,8 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     const aggregates = nodeAggregates.get(id);
     const aggregateFn = aggregationModel[column.field];
     if (!node.row && aggregates && aggregateFn && column.field in aggregates) {
-      return `${formatAggregate(aggregateFn, aggregates[column.field], column)} (${localeText.aggregationFunctions[aggregateFn].toLowerCase()})`;
+      const formatted = formatAggregate(aggregateFn, aggregates[column.field], column, aggregationFunctions[aggregateFn]);
+      return `${formatted} (${getAggregationLabel(aggregateFn, aggregationFunctions, localeText).toLowerCase()})`;
     }
     if (!node.row) {
       return null;
@@ -2146,7 +2239,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
       return value ? <CheckIcon fontSize="small" aria-label={localeText.booleanTrue} /> : <CloseIcon fontSize="small" aria-label={localeText.booleanFalse} />;
     }
     return (
-      <Box component="span" sx={ellipsisSx}>
+      <Box component="span" sx={wrapText ? wrappingTextSx : ellipsisSx}>
         {formattedValue}
       </Box>
     );
@@ -2212,6 +2305,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     const row = (node.row ?? EMPTY_OBJECT) as R;
     const selected = selectedSet.has(node.id);
     const edit = editing?.id === node.id ? editing : null;
+    const autoHeight = isAutoHeightRow(node);
     const colSpans = new Map<number, number>();
     const skippedColumns = new Set<number>();
     if (hasColSpan && node.row) {
@@ -2234,6 +2328,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     return (
       <TableRow
         key={node.id}
+        ref={autoHeight ? getRowRef(node.id) : undefined}
         role="row"
         hover
         selected={selected}
@@ -2289,7 +2384,8 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
             : undefined
         }
         sx={{
-          height: rowHeightFor(node),
+          height: autoHeight ? 'auto' : rowHeightFor(node),
+          minHeight: autoHeight ? rowHeight + (rowSpacings.get(node.id)?.top ?? 0) + (rowSpacings.get(node.id)?.bottom ?? 0) : undefined,
           boxSizing: 'border-box',
           paddingTop: `${rowSpacings.get(node.id)?.top ?? 0}px`,
           paddingBottom: `${rowSpacings.get(node.id)?.bottom ?? 0}px`,
@@ -2354,6 +2450,8 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
               }}
               sx={{
                 ...cellSx(index, false),
+                // The doubled selector outranks the grid-wide rule that removes vertical cell padding.
+                ...(autoHeight && { height: 'auto', alignSelf: 'stretch', ...wrappingTextSx, '&&': { paddingBlock: '8px' } }),
                 ...(colSpanCount > 1 && {
                   width: spanWidth(index, colSpanCount),
                   minWidth: spanWidth(index, colSpanCount),
@@ -2375,7 +2473,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
                 }),
               }}
             >
-              {editingCell && edit ? renderEditor(column, node, row, edit) : renderValue(column, node, row)}
+              {editingCell && edit ? renderEditor(column, node, row, edit) : renderValue(column, node, row, autoHeight)}
             </TableCell>
           );
         })}
@@ -2444,7 +2542,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
           )}
           {aggregateFn && (
             <Box component="span" sx={{ color: 'text.secondary', fontSize: 12, fontWeight: 400, lineHeight: 1.2 }}>
-              {aggregateFn}
+              {aggregationFunctions[aggregateFn]?.label ?? aggregateFn}
             </Box>
           )}
         </Box>
@@ -2552,10 +2650,14 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     disableColumnSelector,
     disableDensitySelector,
     disableFilterSelector: disableColumnFilter,
+    filterColumns: pivoting?.sourceColumns,
+    onOpenPivotPanel: pivoting ? (anchor: HTMLElement) => setMenuPanel({ kind: 'pivot', anchor }) : undefined,
+    pivotActive: pivoting?.enabled,
   };
   const Toolbar: ComponentType<GridToolbarProps<any>> = slots?.toolbar ?? GridToolbar;
   const FilterPanel: ComponentType<GridFilterPanelSlotProps<any>> = slots?.filterPanel ?? GridFilterPanel;
   const ColumnsPanel: ComponentType<GridColumnsPanelSlotProps<any>> = slots?.columnsPanel ?? GridColumnsPanel;
+  const PivotPanel: ComponentType<GridPivotPanelSlotProps<any>> = slots?.pivotPanel ?? GridPivotPanel;
   const NoRowsOverlay = slots?.noRowsOverlay;
   const LoadingOverlay = slots?.loadingOverlay;
   const FooterSlot = slots?.footer;
@@ -2564,7 +2666,8 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
   const footerRowCount = paginationMode === 'server' ? (rowCount ?? totalRowCount) : totalRowCount;
   const bottomRows = pinnedRows?.bottom ?? EMPTY_ARRAY;
   const topRows = pinnedRows?.top ?? EMPTY_ARRAY;
-  const hasFooterAggregates = footerAggregates !== null && Object.keys(footerAggregates).length > 0;
+  const footerValues = isPivoted ? (pivoting?.totals ?? null) : footerAggregates;
+  const hasFooterAggregates = footerValues !== null && Object.keys(footerValues).length > 0;
 
   return (
     <Paper
@@ -2585,7 +2688,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
       >
         {menuPanel?.kind === 'filter' && (
           <FilterPanel
-            columns={userColumns}
+            columns={pivoting?.sourceColumns ?? userColumns}
             filterModel={filterModel}
             onFilterModelChange={setFilterModel}
             localeText={localeText}
@@ -2601,6 +2704,19 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
             {...slotProps?.columnsPanel}
           />
         )}
+        {menuPanel?.kind === 'pivot' && pivoting && (
+          <PivotPanel
+            columns={pivoting.sourceColumns}
+            active={pivoting.enabled}
+            onActiveChange={pivoting.setEnabled}
+            model={pivoting.model}
+            onModelChange={pivoting.setModel}
+            getAvailableFunctions={(column) => getAvailableAggregationFunctions(column, aggregationFunctions)}
+            getFunctionLabel={(fn) => getAggregationLabel(fn, aggregationFunctions, localeText)}
+            localeText={localeText}
+            {...slotProps?.pivotPanel}
+          />
+        )}
       </Popover>
       {loading &&
         (LoadingOverlay ? (
@@ -2613,7 +2729,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
         onScroll={handleScroll}
         onKeyDown={handleKeyDown}
         onPaste={handlePaste}
-        sx={{ height: autoHeight ? 'auto' : height, position: 'relative', overflow: 'auto' }}
+        sx={{ height: autoHeight ? 'auto' : height, position: 'relative', overflow: 'auto', ...(hasAutoHeightRows && { overflowAnchor: 'none' }) }}
       >
         <Table
           role="grid"
@@ -2700,13 +2816,13 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
           {(bottomRows.length > 0 || hasFooterAggregates) && (
             <TableFooter sx={{ position: 'sticky', bottom: 0, zIndex: 3, bgcolor: 'background.paper' }}>
               {bottomRows.map((row, index) => renderRow(getPinnedRowNode(row), null, headerRowCount + topRows.length + totalRowCount + index + 1))}
-              {hasFooterAggregates && footerAggregates && (
+              {hasFooterAggregates && footerValues && (
                 <TableRow role="row" sx={{ height: rowHeight, width: totalWidth }}>
                   {renderColumns((column, index) => {
                     const fn = aggregationModel[column.field];
                     return (
                       <TableCell key={column.field} role="gridcell" sx={{ ...cellSx(index, false), fontWeight: 500, color: 'primary.main' }}>
-                        {fn && column.field in footerAggregates ? formatAggregate(fn, footerAggregates[column.field], column) : null}
+                        {fn && column.field in footerValues ? formatAggregate(fn, footerValues[column.field], column, aggregationFunctions[fn]) : null}
                       </TableCell>
                     );
                   })}
@@ -2827,6 +2943,108 @@ function DataSourceGrid<R extends GridValidRowModel>(props: DataGridProps<R> & {
   );
 }
 
+const getPivotRowId = (row: GridValidRowModel): GridRowId => row[PIVOT_ROW_ID];
+const getPivotRowPath = (row: GridValidRowModel): string[] => row[PIVOT_ROW_PATH];
+
+/** Props that describe source rows, or act on them, and make no sense for generated rows. */
+const PIVOT_ROW_PROP_OVERRIDES = {
+  rowSelection: false,
+  checkboxSelection: false,
+  keepNonExistentRowsSelected: true,
+  rowReordering: false,
+  rowSpanning: false,
+  disableRowGrouping: true,
+  disableAggregation: true,
+  rowGroupingModel: [],
+  onRowGroupingModelChange: undefined,
+  onAggregationModelChange: undefined,
+  getDetailPanelContent: undefined,
+  getChildrenCount: undefined,
+  onFetchChildren: undefined,
+  pinnedRows: undefined,
+  getRowHeight: undefined,
+  getRowSpacing: undefined,
+  getRowClassName: undefined,
+  getCellClassName: undefined,
+  isRowSelectable: undefined,
+  isCellEditable: undefined,
+  onRowClick: undefined,
+  onRowDoubleClick: undefined,
+  onCellClick: undefined,
+  onCellDoubleClick: undefined,
+  onCellKeyDown: undefined,
+} as const;
+
+/**
+ * Sits above the grid and swaps in generated rows and columns while a pivot table shows.
+ * It stays mounted when pivoting toggles, so the grid keeps its scroll position, column widths and the rest of its state.
+ */
+function PivotingGrid<R extends GridValidRowModel>(props: DataGridProps<R>) {
+  const { rows, columns, initialState, disablePivoting = false, sortingMode, filterMode, paginationMode } = props;
+  const [filterModel, setFilterModel] = useGridState(
+    props.filterModel,
+    initialState?.filter?.filterModel ?? DEFAULT_FILTER_MODEL,
+    props.onFilterModelChange,
+  );
+  const [enabled, setEnabled] = useGridState(props.pivotActive, initialState?.pivoting?.enabled ?? false, props.onPivotActiveChange);
+  const [model, setModel] = useGridState(props.pivotModel, initialState?.pivoting?.model ?? EMPTY_PIVOT_MODEL, props.onPivotModelChange);
+  const sourceRowsRef = useRef<GridPivoting<R>['sourceRowsRef']['current']>(null);
+
+  const available = !disablePivoting && (sortingMode ?? 'client') === 'client' && (filterMode ?? 'client') === 'client' && (paginationMode ?? 'client') === 'client';
+  const applied = available && enabled && !isPivotModelEmpty(model);
+  const functions = props.aggregationFunctions ?? GRID_AGGREGATION_FUNCTIONS;
+  const totalLabel = props.localeText?.pivotTotal ?? DEFAULT_LOCALE_TEXT.pivotTotal;
+
+  const pivot = useMemo<GridPivotResult | null>(() => {
+    if (!applied) {
+      return null;
+    }
+    const columnsByField = new Map(columns.map((column) => [column.field, column]));
+    const edited = sourceRowsRef.current;
+    const sourceRows = edited?.source === rows ? edited.rows : rows;
+    const predicate = getFilterPredicate(filterModel, columnsByField, columns);
+    return computePivot({
+      rows: predicate ? sourceRows.filter(predicate) : sourceRows,
+      columns: columnsByField,
+      model,
+      functions,
+      totalLabel,
+    });
+  }, [applied, rows, columns, filterModel, model, functions, totalLabel]);
+
+  const pivoting: GridPivoting<R> | undefined = available
+    ? {
+        enabled,
+        applied,
+        model,
+        setEnabled,
+        setModel,
+        sourceColumns: columns,
+        totals: pivot?.totals ?? null,
+        rowLabelColumn: (pivot?.rowLabelColumn as GridColDef<R> | undefined) ?? null,
+        sourceRowsRef,
+      }
+    : undefined;
+
+  const pivotProps = pivot
+    ? ({
+        ...PIVOT_ROW_PROP_OVERRIDES,
+        rows: pivot.rows,
+        columns: pivot.columns,
+        getRowId: getPivotRowId,
+        treeData: true,
+        getTreeDataPath: getPivotRowPath,
+        aggregationModel: pivot.aggregationModel,
+        columnGroupingModel: pivot.columnGroupingModel,
+        groupingColDef: { ...(pivot.rowHeaderName ? { headerName: pivot.rowHeaderName } : {}), ...props.groupingColDef },
+        // The source rows were filtered above, and the filter fields do not exist on the generated rows.
+        filterMode: 'server',
+      } as unknown as Partial<DataGridProps<R>>)
+    : undefined;
+
+  return <DataGridBase<R> {...props} filterModel={filterModel} onFilterModelChange={setFilterModel} {...pivotProps} pivoting={pivoting} />;
+}
+
 export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props: DataGridProps<R>) {
-  return props.dataSource ? <DataSourceGrid<R> {...props} dataSource={props.dataSource} /> : <DataGridBase<R> {...props} />;
+  return props.dataSource ? <DataSourceGrid<R> {...props} dataSource={props.dataSource} /> : <PivotingGrid<R> {...props} />;
 }

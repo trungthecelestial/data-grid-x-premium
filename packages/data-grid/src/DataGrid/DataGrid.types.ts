@@ -46,9 +46,41 @@ export type GridCellSelectionModel = Record<GridRowId, Record<string, boolean>>;
 
 export type GridDensity = 'compact' | 'standard' | 'comfortable';
 
-export type GridAggregationFunction = 'sum' | 'avg' | 'min' | 'max' | 'size';
+export type GridBuiltInAggregationFunction = 'sum' | 'avg' | 'min' | 'max' | 'size';
+
+/** Key of a function: a built-in one, or one registered through `aggregationFunctions`. */
+export type GridAggregationFunction = GridBuiltInAggregationFunction | (string & {});
+
+export interface GridAggregationParams<V = any> {
+  /** One entry per row, empty cells included. */
+  values: V[];
+  field: string;
+  /** The row or group being aggregated. `null` for the grand total. */
+  groupId: GridRowId | null;
+}
+
+export interface GridAggregationFunctionDef<V = any, A = any> {
+  apply: (params: GridAggregationParams<V>) => A;
+  /** Name shown in the column menu and headers. Defaults to the locale text, then the function's key. */
+  label?: string;
+  /** Column types the function is offered for. Defaults to every type. */
+  columnTypes?: readonly GridColType[];
+  /** Formats the result. Defaults to the column's formatting. */
+  valueFormatter?: (value: A) => string;
+  /** Replaces the value passed to `apply`, for functions that need more of the row, such as a weighted average. */
+  getCellValue?: (params: { field: string; row: any; value: any }) => V;
+}
 
 export type GridAggregationModel = Record<string, GridAggregationFunction>;
+
+export interface GridPivotModel {
+  /** Fields whose values become the rows, outermost level first. */
+  rows: { field: string }[];
+  /** Fields whose values become the columns, outermost level first. */
+  columns: { field: string; sort?: 'asc' | 'desc' }[];
+  /** Fields aggregated into the cells of the table. */
+  values: { field: string; aggFunc: GridAggregationFunction }[];
+}
 
 export interface GridPinnedColumns {
   left?: string[];
@@ -125,6 +157,12 @@ export interface GridColDef<R extends GridValidRowModel = GridValidRowModel> {
   sortable?: boolean;
   filterable?: boolean;
   hideable?: boolean;
+  /** Set to false to remove the column from aggregation. */
+  aggregable?: boolean;
+  /** Keys of the functions offered for this column. Defaults to every function that accepts its type. */
+  availableAggregationFunctions?: readonly GridAggregationFunction[];
+  /** Set to false to keep the column out of the pivot panel. */
+  pivotable?: boolean;
   /** Set to false to keep the column out of the pin actions of its menu. */
   pinnable?: boolean;
   resizable?: boolean;
@@ -278,6 +316,7 @@ export interface GridInitialState {
   rowSelection?: GridRowSelectionModel;
   aggregation?: { model?: GridAggregationModel };
   rowGrouping?: { model?: string[] };
+  pivoting?: { enabled?: boolean; model?: GridPivotModel };
 }
 
 export interface GridLocaleText {
@@ -307,7 +346,7 @@ export interface GridLocaleText {
   filterPanelLogicOr: string;
   filterPanelNoFilters: string;
   filterOperators: Record<string, string>;
-  aggregationFunctions: Record<GridAggregationFunction, string>;
+  aggregationFunctions: Record<GridBuiltInAggregationFunction, string> & Record<string, string>;
   footerRowsSelected: (count: number) => string;
   checkboxSelectionHeader: string;
   checkboxSelectionRow: string;
@@ -333,10 +372,22 @@ export interface GridLocaleText {
   columnMenuPinRight: string;
   columnMenuUnpin: string;
   headerFilterOperator: string;
+  toolbarPivot: string;
+  pivotPanelActive: string;
+  pivotRows: string;
+  pivotColumns: string;
+  pivotValues: string;
+  pivotAddField: string;
+  pivotMoveUp: string;
+  pivotMoveDown: string;
+  pivotRemove: string;
+  pivotTotal: string;
 }
 
 export interface GridToolbarProps<R extends GridValidRowModel = GridValidRowModel> {
   columns: readonly GridColDef<R>[];
+  /** Columns the filter panel offers. Defaults to `columns`. While pivoting these are the source columns. */
+  filterColumns?: readonly GridColDef<R>[];
   columnVisibilityModel: GridColumnVisibilityModel;
   onColumnVisibilityModelChange: (model: GridColumnVisibilityModel) => void;
   filterModel: GridFilterModel;
@@ -358,6 +409,9 @@ export interface GridToolbarProps<R extends GridValidRowModel = GridValidRowMode
   disableQuickFilter?: boolean;
   /** Hides the "Export" button. */
   disableExport?: boolean;
+  /** Opens the pivot panel under the given element. Omitted when pivoting is not available. */
+  onOpenPivotPanel?: (anchor: HTMLElement) => void;
+  pivotActive?: boolean;
 }
 
 export interface GridOverlayProps {
@@ -393,6 +447,18 @@ export interface GridColumnsPanelSlotProps<R extends GridValidRowModel = GridVal
   localeText: GridLocaleText;
 }
 
+export interface GridPivotPanelSlotProps<R extends GridValidRowModel = GridValidRowModel> {
+  /** The source columns. */
+  columns: readonly GridColDef<R>[];
+  active: boolean;
+  onActiveChange: (active: boolean) => void;
+  model: GridPivotModel;
+  onModelChange: (model: GridPivotModel) => void;
+  getAvailableFunctions: (column: GridColDef<R>) => GridAggregationFunction[];
+  getFunctionLabel: (fn: GridAggregationFunction) => string;
+  localeText: GridLocaleText;
+}
+
 export interface GridSlots {
   toolbar?: ComponentType<GridToolbarProps<any>>;
   /** Replaces the column header menu. Receives the props of the built-in `GridColumnMenu`. */
@@ -405,6 +471,7 @@ export interface GridSlots {
   pagination?: ComponentType<GridPaginationSlotProps>;
   filterPanel?: ComponentType<GridFilterPanelSlotProps<any>>;
   columnsPanel?: ComponentType<GridColumnsPanelSlotProps<any>>;
+  pivotPanel?: ComponentType<GridPivotPanelSlotProps<any>>;
 }
 
 /** Extra props merged into the props each slot receives. */
@@ -417,6 +484,7 @@ export interface GridSlotProps {
   pagination?: Record<string, unknown>;
   filterPanel?: Record<string, unknown>;
   columnsPanel?: Record<string, unknown>;
+  pivotPanel?: Record<string, unknown>;
 }
 
 export interface GridEditStopParams {
@@ -569,9 +637,18 @@ export interface GridApi {
 
   setAggregationModel: (model: GridAggregationModel) => void;
   setRowGroupingModel: (model: string[]) => void;
+  isPivotActive: () => boolean;
+  /** Does nothing where pivoting is not available. */
+  setPivotActive: (active: boolean) => void;
+  getPivotModel: () => GridPivotModel;
+  /** Does nothing where pivoting is not available. */
+  setPivotModel: (model: GridPivotModel) => void;
   toggleDetailPanel: (id: GridRowId) => void;
   getExpandedDetailPanels: () => GridRowId[];
   setRowChildrenExpansion: (id: GridRowId, isExpanded: boolean) => void;
+
+  /** Forgets every measured row height. Rows on screen are measured again right away. */
+  resetRowHeights: () => void;
 
   /** Scrolls the grid to a pixel offset. */
   scroll: (params: GridScrollParams) => void;
@@ -583,7 +660,7 @@ export interface GridApi {
   /** Fetches the rows again through `dataSource`. */
   refetch: () => void;
 
-  /** Snapshot of the sorting, filter, pagination, column, density, selection, aggregation and grouping state. */
+  /** Snapshot of the sorting, filter, pagination, column, density, selection, aggregation, grouping and pivot state. */
   exportState: () => GridInitialState;
   restoreState: (state: GridInitialState) => void;
   /** Listens to a grid event. Returns the function that stops listening. */
@@ -758,6 +835,21 @@ export interface DataGridProps<R extends GridValidRowModel = GridValidRowModel> 
   onAggregationModelChange?: (model: GridAggregationModel) => void;
   /** Turns off choosing an aggregation from the column menu. */
   disableAggregation?: boolean;
+  /** Functions the grid can aggregate with, by key. Replaces the built-in ones, so spread `GRID_AGGREGATION_FUNCTIONS` to keep them. */
+  aggregationFunctions?: Readonly<Record<string, GridAggregationFunctionDef>>;
+
+  /**
+   * Shows a pivot table of the rows according to `pivotModel`.
+   * Filters apply to the source rows first, and sorting applies to the generated rows.
+   * While the table shows, row selection, editing, row-based callbacks and props such as `getRowClassName` are off because the rows are generated.
+   * Needs client-side rows: it is unavailable with `dataSource` or a server mode.
+   */
+  pivotActive?: boolean;
+  onPivotActiveChange?: (active: boolean) => void;
+  pivotModel?: GridPivotModel;
+  onPivotModelChange?: (model: GridPivotModel) => void;
+  /** Removes the pivot button from the toolbar and ignores `pivotActive`. */
+  disablePivoting?: boolean;
 
   getDetailPanelContent?: (params: { id: GridRowId; row: R }) => ReactNode;
   /** Height of an open detail panel in px. Defaults to 200. */
@@ -788,8 +880,13 @@ export interface DataGridProps<R extends GridValidRowModel = GridValidRowModel> 
   getCellClassName?: (params: GridCellClassNameParams<R>) => string;
   /** Space in px added above and below a row, for example to separate rows into cards. */
   getRowSpacing?: (params: GridRowSpacingParams<R>) => GridRowSpacing;
-  /** Height of one row in px. Return `null` to use `rowHeight`. */
-  getRowHeight?: (params: GridRowParams<R>) => number | null;
+  /**
+   * Height of one row in px. Return `null` to use `rowHeight`, or `'auto'` to size the row to its content, with `rowHeight` as the minimum.
+   * Text in auto rows wraps. Column virtualization is off while any row on the page is `'auto'`, and such rows do not merge cells under `rowSpanning`.
+   */
+  getRowHeight?: (params: GridRowParams<R>) => number | null | undefined | 'auto';
+  /** Height assumed for an `'auto'` row until it has been rendered. Close estimates keep the scrollbar steady. Defaults to `rowHeight`. */
+  getEstimatedRowHeight?: (params: GridRowParams<R>) => number | null | undefined;
   /** Decides per cell whether it can be edited, on top of the column's `editable`. */
   isCellEditable?: (params: GridCellParams<R>) => boolean;
 

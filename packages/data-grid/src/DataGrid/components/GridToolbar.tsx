@@ -1,6 +1,7 @@
 import ClearIcon from '@mui/icons-material/Clear';
 import FileDownloadIcon from '@mui/icons-material/FileDownload';
 import FilterListIcon from '@mui/icons-material/FilterList';
+import PivotTableChartIcon from '@mui/icons-material/PivotTableChart';
 import SearchIcon from '@mui/icons-material/Search';
 import TableRowsIcon from '@mui/icons-material/TableRows';
 import ViewColumnIcon from '@mui/icons-material/ViewColumn';
@@ -28,6 +29,7 @@ type PanelName = 'columns' | 'filters' | 'density' | 'export' | null;
 export function GridToolbar<R extends GridValidRowModel = GridValidRowModel>(props: GridToolbarProps<R>) {
   const {
     columns,
+    filterColumns = columns,
     columnVisibilityModel,
     onColumnVisibilityModelChange,
     filterModel,
@@ -43,6 +45,8 @@ export function GridToolbar<R extends GridValidRowModel = GridValidRowModel>(pro
     disableFilterSelector,
     disableQuickFilter,
     disableExport,
+    onOpenPivotPanel,
+    pivotActive = false,
   } = props;
 
   const [panel, setPanel] = useState<PanelName>(null);
@@ -95,6 +99,18 @@ export function GridToolbar<R extends GridValidRowModel = GridValidRowModel>(pro
       {!disableDensitySelector && (
         <Button size="small" color="inherit" sx={buttonSx} startIcon={<DensityIcon />} onClick={open('density')}>
           {localeText.toolbarDensity}
+        </Button>
+      )}
+      {onOpenPivotPanel && (
+        <Button
+          size="small"
+          color={pivotActive ? 'primary' : 'inherit'}
+          sx={buttonSx}
+          startIcon={<PivotTableChartIcon />}
+          aria-pressed={pivotActive}
+          onClick={(event) => onOpenPivotPanel(event.currentTarget)}
+        >
+          {localeText.toolbarPivot}
         </Button>
       )}
       {!disableExport && (
@@ -160,7 +176,7 @@ export function GridToolbar<R extends GridValidRowModel = GridValidRowModel>(pro
         anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
       >
         <GridFilterPanel
-          columns={columns}
+          columns={filterColumns}
           filterModel={filterModel}
           onFilterModelChange={onFilterModelChange}
           localeText={localeText}

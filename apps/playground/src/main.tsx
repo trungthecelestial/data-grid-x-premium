@@ -1,4 +1,4 @@
-import { DataGrid, useGridApiRef, type GridColDef } from '@dna/data-grid';
+import { DataGrid, GRID_AGGREGATION_FUNCTIONS, useGridApiRef, type GridAggregationFunctionDef, type GridColDef } from '@dna/data-grid';
 import { dnaTheme } from '@dna/dna-ui';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
@@ -202,8 +202,78 @@ function MasterDetail() {
   );
 }
 
+const aggregationFunctions: Record<string, GridAggregationFunctionDef> = {
+  ...GRID_AGGREGATION_FUNCTIONS,
+  median: {
+    label: 'Median',
+    columnTypes: ['number'],
+    apply: ({ values }) => {
+      const sorted = values.filter((value) => value != null).sort((a, b) => a - b);
+      return sorted[Math.floor(sorted.length / 2)] ?? null;
+    },
+  },
+};
+
+function Pivoting() {
+  return (
+    <>
+      <Typography variant="body2" sx={{ mb: 1 }}>
+        Open Pivot in the toolbar to change the table. Filters apply to the source rows, and Median is a custom aggregation function.
+      </Typography>
+      <DataGrid
+        rows={employees}
+        columns={columns}
+        aggregationFunctions={aggregationFunctions}
+        showToolbar
+        pagination={false}
+        height={520}
+        defaultGroupingExpansionDepth={-1}
+        initialState={{
+          pivoting: {
+            enabled: true,
+            model: {
+              rows: [{ field: 'team' }, { field: 'role' }],
+              columns: [{ field: 'remote' }],
+              values: [
+                { field: 'salary', aggFunc: 'median' },
+                { field: 'age', aggFunc: 'avg' },
+              ],
+            },
+          },
+        }}
+      />
+    </>
+  );
+}
+
+const SENTENCE = 'Measured row heights let long text wrap instead of being cut off, however wide the column is. ';
+const notes = employees.map((employee, index) => ({ id: employee.id, name: employee.name, note: SENTENCE.repeat(1 + (index % 6)) }));
+
+function AutoRowHeight() {
+  return (
+    <>
+      <Typography variant="body2" sx={{ mb: 1 }}>
+        Each row takes the height of its content. Resize the Note column, or scroll up from the bottom: the view holds still.
+      </Typography>
+      <DataGrid
+        rows={notes}
+        columns={[
+          { field: 'name', headerName: 'Name', width: 160 },
+          { field: 'note', headerName: 'Note', flex: 1, minWidth: 240 },
+        ]}
+        getRowHeight={() => 'auto'}
+        getEstimatedRowHeight={() => 90}
+        pagination={false}
+        height={520}
+      />
+    </>
+  );
+}
+
 const TABS = [
   { label: 'Overview', element: <Overview /> },
+  { label: 'Pivoting', element: <Pivoting /> },
+  { label: 'Auto row height', element: <AutoRowHeight /> },
   { label: 'Virtualized (1000 rows)', element: <Virtualized /> },
   { label: 'Wide (60 columns)', element: <WideColumns /> },
   { label: 'Row reordering', element: <RowReordering /> },

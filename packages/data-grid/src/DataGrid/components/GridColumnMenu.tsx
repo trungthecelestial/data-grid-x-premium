@@ -36,6 +36,8 @@ export interface GridColumnMenuProps<R extends GridValidRowModel> {
   /** Functions offered for the column. Omit or pass an empty list to leave aggregation out of the menu. */
   aggregationFunctions?: readonly GridAggregationFunction[];
   aggregation?: GridAggregationFunction;
+  /** Name shown for a function. Defaults to the locale text, then the function's key. */
+  getAggregationFunctionLabel?: (fn: GridAggregationFunction) => string;
   onAggregationChange?: (fn: GridAggregationFunction | undefined) => void;
   grouped?: boolean;
   onToggleGroup?: () => void;
@@ -50,21 +52,6 @@ export interface GridColumnMenuProps<R extends GridValidRowModel> {
   onPin?: (side: 'left' | 'right' | null) => void;
 }
 
-/** Aggregation functions that make sense for a column type. */
-export function getAvailableAggregationFunctions(column: GridColDef<any>): GridAggregationFunction[] {
-  switch (column.type) {
-    case 'number':
-      return ['sum', 'avg', 'min', 'max', 'size'];
-    case 'date':
-    case 'dateTime':
-      return ['min', 'max', 'size'];
-    case 'actions':
-      return [];
-    default:
-      return ['size'];
-  }
-}
-
 export function GridColumnMenu<R extends GridValidRowModel>(props: GridColumnMenuProps<R>) {
   const {
     column,
@@ -76,6 +63,7 @@ export function GridColumnMenu<R extends GridValidRowModel>(props: GridColumnMen
     onFilter,
     aggregationFunctions = [],
     aggregation,
+    getAggregationFunctionLabel,
     onAggregationChange,
     grouped = false,
     onToggleGroup,
@@ -138,7 +126,7 @@ export function GridColumnMenu<R extends GridValidRowModel>(props: GridColumnMen
           </MenuItem>
           {aggregationFunctions.map((fn) => (
             <MenuItem key={fn} value={fn}>
-              {localeText.aggregationFunctions[fn]}
+              {getAggregationFunctionLabel?.(fn) ?? localeText.aggregationFunctions[fn] ?? fn}
             </MenuItem>
           ))}
         </TextField>

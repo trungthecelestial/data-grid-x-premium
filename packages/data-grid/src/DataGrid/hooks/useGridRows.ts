@@ -7,7 +7,7 @@ import type {
   GridSortModel,
   GridValidRowModel,
 } from '../DataGrid.types';
-import { computeAggregates } from '../features/aggregation';
+import { computeAggregates, type GridAggregationFunctions } from '../features/aggregation';
 import { getFormattedValue } from '../features/columns';
 import { getFilterPredicate } from '../features/filtering';
 import { getRowComparator } from '../features/sorting';
@@ -16,6 +16,7 @@ import {
   buildGroupedTree,
   buildPathTree,
   collectRows,
+  NO_VALUE_LABEL,
   flattenTree,
   pruneTree,
   sortTree,
@@ -43,6 +44,7 @@ export interface UseGridRowsParams<R extends GridValidRowModel> {
   page: number;
   pageSize: number;
   aggregationModel: GridAggregationModel;
+  aggregationFunctions: GridAggregationFunctions;
 }
 
 export interface UseGridRowsResult<R extends GridValidRowModel> {
@@ -80,6 +82,7 @@ export function useGridRows<R extends GridValidRowModel>(params: UseGridRowsPara
     page,
     pageSize,
     aggregationModel,
+    aggregationFunctions,
   } = params;
 
   const isGroup = (treeData && Boolean(getTreeDataPath)) || rowGroupingModel.length > 0;
@@ -100,7 +103,7 @@ export function useGridRows<R extends GridValidRowModel>(params: UseGridRowsPara
         : buildGroupedTree(rows, getRowId, rowGroupingModel, (row, field) => {
             const column = columnsByField.get(field);
             const label = column ? getFormattedValue(row, column) : String(row[field] ?? '');
-            return label === '' ? '(No value)' : label;
+            return label === '' ? NO_VALUE_LABEL : label;
           });
     if (predicate) {
       tree = pruneTree(tree, predicate);
@@ -150,16 +153,16 @@ export function useGridRows<R extends GridValidRowModel>(params: UseGridRowsPara
     if (hasAggregation) {
       for (const node of pageNodes) {
         if (node.children.length > 0) {
-          result.set(node.id, computeAggregates(collectRows(node), aggregationModel, columnsByField));
+          result.set(node.id, computeAggregates(collectRows(node), aggregationModel, columnsByField, aggregationFunctions, node.id));
         }
       }
     }
     return result;
-  }, [hasAggregation, pageNodes, aggregationModel, columnsByField]);
+  }, [hasAggregation, pageNodes, aggregationModel, columnsByField, aggregationFunctions]);
 
   const footerAggregates = useMemo(
-    () => (hasAggregation ? computeAggregates(filteredRows, aggregationModel, columnsByField) : null),
-    [hasAggregation, filteredRows, aggregationModel, columnsByField],
+    () => (hasAggregation ? computeAggregates(filteredRows, aggregationModel, columnsByField, aggregationFunctions) : null),
+    [hasAggregation, filteredRows, aggregationModel, columnsByField, aggregationFunctions],
   );
 
   return {

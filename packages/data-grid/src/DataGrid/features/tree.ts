@@ -1,6 +1,7 @@
 import type { GridRowId, GridValidRowModel } from '../DataGrid.types';
 
 export const AUTO_GENERATED_ID_PREFIX = 'auto-generated-row-';
+export const NO_VALUE_LABEL = '(No value)';
 
 export interface GridTreeNode<R extends GridValidRowModel> {
   id: GridRowId;
