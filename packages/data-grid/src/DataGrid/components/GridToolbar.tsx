@@ -82,7 +82,7 @@ export function GridToolbar<R extends GridValidRowModel = GridValidRowModel>(pro
   const buttonSx = { fontSize: 12, fontWeight: 500, '& .MuiButton-startIcon svg': { fontSize: 16 } };
 
   return (
-    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, p: '4px 4px 0', mb: 1, flexWrap: 'wrap' }} role="toolbar">
+    <Box className="MuiDataGrid-toolbarContainer" sx={{ display: 'flex', alignItems: 'center', gap: 1, p: '4px 4px 0', mb: 1, flexWrap: 'wrap' }} role="toolbar">
       {!disableColumnSelector && (
         <Button size="small" color="inherit" sx={buttonSx} startIcon={<ViewColumnIcon />} onClick={open('columns')}>
           {localeText.toolbarColumns}

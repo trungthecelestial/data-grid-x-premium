@@ -83,6 +83,7 @@ import type {
   GridRowSpacing,
   GridRowUpdate,
   GridSortDirection,
+  GridState,
   GridToolbarProps,
   GridValidRowModel,
 } from './DataGrid.types';
@@ -127,6 +128,8 @@ import { useGridState } from './hooks/useGridState';
 import { useMeasuredRowHeights } from './hooks/useMeasuredRowHeights';
 import { getOffsets, getVirtualRange } from './hooks/virtualization';
 import { DEFAULT_LOCALE_TEXT } from './localeText';
+import { cx, gridClasses, resolveStyleOverrides } from './gridClasses';
+import { GridApiContext, GridRootPropsContext } from './gridState';
 
 const DEFAULT_PAGE_SIZE_OPTIONS = [10, 25, 50] as const;
 const NO_SPACING: Readonly<Required<GridRowSpacing>> = { top: 0, bottom: 0 };
@@ -210,6 +213,7 @@ const ellipsisSx = { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: '
 const wrappingTextSx = { whiteSpace: 'normal', overflowWrap: 'anywhere' } as const;
 
 const JUSTIFY = { left: 'flex-start', center: 'center', right: 'flex-end' } as const;
+const capitalize = <S extends string>(value: S) => (value.charAt(0).toUpperCase() + value.slice(1)) as Capitalize<S>;
 
 const menuButtonShownSx = { width: 24, p: 0.25, opacity: 1, mx: 0.25 } as const;
 
@@ -490,13 +494,18 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
   /** The column header that holds the grid's tab stop, while the focus is in the header row. */
   const [headerFocusCol, setHeaderFocusCol] = useState<number | null>(null);
   const shouldFocusHeaderRef = useRef(false);
-  const isRtl = useTheme().direction === 'rtl';
+  const theme = useTheme();
+  const isRtl = theme.direction === 'rtl';
+  // Styles from `theme.components.MuiDataGrid.styleOverrides`, keyed by the slots of `gridClasses`.
+  const themeOverrides = (theme.components as Record<string, { styleOverrides?: Record<string, unknown> } | undefined> | undefined)?.MuiDataGrid
+    ?.styleOverrides;
   // An arrow pointing at the content flips with the reading direction.
   const collapsedIconSx = useMemo(() => (isRtl ? { transform: 'scaleX(-1)' } : undefined), [isRtl]);
   const [scrollTop, setScrollTop] = useState(0);
   const [scrollLeft, setScrollLeft] = useState(0);
 
   const scrollerRef = useRef<HTMLDivElement>(null);
+  const rootElementRef = useRef<HTMLDivElement>(null);
   const editingRef = useRef(editing);
   editingRef.current = editing;
   const committingRef = useRef(false);
@@ -1093,7 +1102,9 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
                 : ''
             : node.label;
         return (
-          <Box sx={{ display: 'flex', alignItems: 'center', minWidth: 0, paddingInlineStart: `${forField === null ? node.depth * 20 : 0}px` }}>
+          <Box
+            className={byRowGrouping ? gridClasses.groupingCriteriaCell : gridClasses.treeDataGroupingCell}
+            sx={{ display: 'flex', alignItems: 'center', minWidth: 0, paddingInlineStart: `${forField === null ? node.depth * 20 : 0}px` }}>
             {expandable ? (
               <IconButton
                 size="small"
@@ -1404,6 +1415,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
   );
 
   const apiObjectRef = useRef<GridApi | null>(null);
+  const internalApiRef = useRef({} as GridApi);
 
   const resolveExport = useCallback(
     (options?: { fields?: string[]; allColumns?: boolean; getRowsToExport?: GridCsvExportOptions['getRowsToExport'] }) => {
@@ -2240,7 +2252,66 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
       return resetSelection ? [...ids] : [...previous.filter((id) => !ids.includes(id)), ...ids];
     });
 
+  // The state snapshot of `apiRef.current.state`. Each part keeps its identity until it changes, so selectors stay stable.
+  const allRowIds = useMemo(() => mergedRows.map(getRowId), [mergedRows, getRowId]);
+  const rowsLookup = useMemo(() => Object.fromEntries([...rowsById].map(([id, row]) => [String(id), row])), [rowsById]);
+  const sortedRowIds = useMemo(() => {
+    const comparator = sortingMode === 'client' ? getRowComparator(sortModel, userColumnMap) : null;
+    return comparator ? [...mergedRows].sort(comparator).map(getRowId) : allRowIds;
+  }, [sortingMode, sortModel, userColumnMap, mergedRows, getRowId, allRowIds]);
+  const filteredRowIds = useMemo(() => filteredRows.map(getRowId), [filteredRows, getRowId]);
+  const visibleRowIds = useMemo(() => rowEntryIndexes.map((index) => (entries[index] as Entry<R>).node.id), [rowEntryIndexes, entries]);
+  const columnLookup = useMemo(
+    () => Object.fromEntries([...userColumns, ...columns].map((column) => [column.field, column])) as Record<string, GridColDef<any>>,
+    [userColumns, columns],
+  );
+  const visibleFields = useMemo(() => columns.map((column) => column.field), [columns]);
+  const dimensions = useMemo(
+    () => Object.fromEntries(columns.map((column, index) => [column.field, { width: widths[index] ?? 0 }])),
+    [columns, widths],
+  );
+  const focusedCellId = focusPosition ? visibleRowIds[focusPosition.row] : undefined;
+  const focusedCellField = focusPosition ? columns[focusPosition.col]?.field : undefined;
+  const focusedHeaderField = headerFocusCol !== null ? columns[headerFocusCol]?.field : undefined;
+  const gridState = useMemo<GridState>(
+    () => ({
+      rows: { ids: allRowIds, totalRowCount: paginationMode === 'server' ? (rowCount ?? rootCount) : allRowIds.length, lookup: rowsLookup },
+      sorting: { sortModel, sortedRowIds },
+      filter: { filterModel, filteredRowIds },
+      pagination: { paginationModel, rowCount: paginationMode === 'server' ? (rowCount ?? rootCount) : rootCount },
+      visibleRowIds,
+      columns: { orderedFields, columnVisibilityModel: visibilityModel, lookup: columnLookup, visibleFields, dimensions },
+      pinnedColumns: pinned,
+      density,
+      rowSelection: selection,
+      cellSelection,
+      aggregation: { model: aggregationModel },
+      rowGrouping: { model: rowGroupingModel as string[] },
+      pivoting: { active: pivoting?.enabled ?? false, model: pivoting?.model ?? EMPTY_PIVOT_MODEL },
+      detailPanel: { expandedRowIds: detailIds as GridRowId[] },
+      editing: editing ? { id: editing.id, field: editing.field ?? null, values: editing.values } : null,
+      focus: {
+        cell: focusedCellId !== undefined && focusedCellField !== undefined && headerFocusCol === null ? { id: focusedCellId, field: focusedCellField } : null,
+        columnHeader: focusedHeaderField !== undefined ? { field: focusedHeaderField } : null,
+      },
+      preferencePanel: {
+        open: menuPanel !== null,
+        openedPanelValue: menuPanel ? (menuPanel.kind === 'filter' ? 'filters' : menuPanel.kind) : null,
+      },
+      columnMenu: { open: columnMenu !== null, field: columnMenu?.field ?? null },
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      allRowIds, paginationMode, rowCount, rootCount, rowsLookup, sortModel, sortedRowIds, filterModel, filteredRowIds, paginationModel,
+      visibleRowIds, orderedFields, visibilityModel, columnLookup, visibleFields, dimensions, pinned, density, selection, cellSelection,
+      aggregationModel, rowGroupingModel, pivoting?.enabled, pivoting?.model, detailIds, editing, focusedCellId, focusedCellField,
+      focusedHeaderField, headerFocusCol, menuPanel, columnMenu,
+    ],
+  );
+
   const api: GridApi = {
+    state: gridState,
+    rootElementRef,
     exportDataAsCsv,
     getDataAsCsv,
     print,
@@ -2609,6 +2680,56 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     },
   };
   apiObjectRef.current = api;
+  // Set during render, so custom slots that read the api through `useGridApiContext` see this render's state.
+  const contextApiRef = apiRef ?? internalApiRef;
+  contextApiRef.current = api;
+
+  // Events for state changes, as MUI X publishes them. Each compares with what the previous render had.
+  const previousStateRef = useRef<GridState | null>(null);
+  useEffect(() => {
+    const previous = previousStateRef.current;
+    previousStateRef.current = gridState;
+    if (!previous || previous === gridState) {
+      return;
+    }
+    const changed = <K extends keyof GridState>(key: K) => previous[key] !== gridState[key];
+    if (previous.sorting.sortModel !== gridState.sorting.sortModel) emit('sortModelChange', gridState.sorting.sortModel);
+    if (previous.filter.filterModel !== gridState.filter.filterModel) emit('filterModelChange', gridState.filter.filterModel);
+    if (previous.pagination.paginationModel !== gridState.pagination.paginationModel) emit('paginationModelChange', gridState.pagination.paginationModel);
+    if (changed('rowSelection')) emit('rowSelectionChange', gridState.rowSelection);
+    if (previous.columns.columnVisibilityModel !== gridState.columns.columnVisibilityModel) {
+      emit('columnVisibilityModelChange', gridState.columns.columnVisibilityModel);
+    }
+    if (changed('density')) emit('densityChange', gridState.density);
+    if (previous.columns.orderedFields.join('\u0000') !== gridState.columns.orderedFields.join('\u0000')) {
+      emit('columnOrderChange', { orderedFields: gridState.columns.orderedFields });
+    }
+    for (const [field, { width }] of Object.entries(gridState.columns.dimensions)) {
+      const before = previous.columns.dimensions[field]?.width;
+      if (before !== undefined && before !== width) emit('columnWidthChange', { field, width });
+    }
+    if (changed('pinnedColumns')) emit('pinnedColumnsChange', gridState.pinnedColumns);
+    if (previous.rowGrouping.model !== gridState.rowGrouping.model) emit('rowGroupingModelChange', gridState.rowGrouping.model);
+    if (previous.aggregation.model !== gridState.aggregation.model) emit('aggregationModelChange', gridState.aggregation.model);
+    if (previous.detailPanel.expandedRowIds !== gridState.detailPanel.expandedRowIds) {
+      emit('detailPanelsExpandedRowIdsChange', gridState.detailPanel.expandedRowIds);
+    }
+    const cell = gridState.focus.cell;
+    if (cell && (previous.focus.cell?.id !== cell.id || previous.focus.cell?.field !== cell.field)) emit('cellFocusIn', cell);
+    const header = gridState.focus.columnHeader;
+    if (header && previous.focus.columnHeader?.field !== header.field) emit('columnHeaderFocus', header);
+    emit('stateChange', gridState);
+  }, [gridState, emit]);
+
+  // Expanding or collapsing a group reports which one changed.
+  const previousExpansionRef = useRef(expansion);
+  useEffect(() => {
+    const previous = previousExpansionRef.current;
+    previousExpansionRef.current = expansion;
+    for (const [id, isExpandedValue] of expansion) {
+      if (previous.get(id) !== isExpandedValue) emit('rowExpansionChange', { id, isExpanded: isExpandedValue });
+    }
+  }, [expansion, emit]);
   const lastEmittedStateRef = useRef<string | null>(null);
   useEffect(() => {
     if (!props.onStateChange) {
@@ -3298,7 +3419,11 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
         selected={selected}
         aria-rowindex={ariaIndex}
         aria-selected={rowSelection ? selected : undefined}
-        className={node.row && getRowClassName ? getRowClassName({ id: node.id, row: node.row, indexRelativeToCurrentPage: rowIndex ?? -1 }) : undefined}
+        className={cx(
+          gridClasses.row,
+          detailIds.includes(node.id) && gridClasses['row--detailPanelExpanded'],
+          node.row && getRowClassName ? getRowClassName({ id: node.id, row: node.row, indexRelativeToCurrentPage: rowIndex ?? -1 }) : undefined,
+        )}
         onClick={(event) => handleRowClick(event, node)}
         onDoubleClick={(event) => {
           const cell = (event.target as HTMLElement).closest<HTMLElement>('[data-field]');
@@ -3387,18 +3512,22 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
               aria-colindex={index + 1}
               aria-colspan={colSpanCount > 1 ? colSpanCount : undefined}
               aria-rowspan={rowSpan?.count}
-              className={
-                node.row && !isSpecialField(column.field)
+              className={cx(
+                gridClasses.cell,
+                gridClasses[`cell--text${capitalize(getDefaultAlign(column))}`],
+                editingCell && gridClasses['cell--editing'],
+                selectedCell && gridClasses['cell--selected'],
+                index < leftCount && gridClasses['cell--pinnedLeft'],
+                index >= rightStart && gridClasses['cell--pinnedRight'],
+                ...(node.row && !isSpecialField(column.field)
                   ? [
                       typeof column.cellClassName === 'function'
                         ? column.cellClassName(getCellParams(node.id, row, column))
                         : column.cellClassName,
                       getCellClassName?.(getCellParams(node.id, row, column)),
                     ]
-                      .filter(Boolean)
-                      .join(' ') || undefined
-                  : undefined
-              }
+                  : []),
+              )}
               aria-selected={cellSelectionEnabled && !isSpecialField(column.field) ? selectedCell : undefined}
               onMouseDown={selectable ? (event) => handleCellMouseDown(event, node.id, rowIndex, index, column.field) : undefined}
               onMouseEnter={selectable ? () => extendCellDrag(rowIndex, index) : undefined}
@@ -3447,7 +3576,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
 
   /** A row of aggregated values: the grand total, or the footer of a group (`group`), which labels its grouping cell. */
   const renderAggregateRow = (key: string, values: Record<string, unknown>, rowHeightValue: number, group: GridTreeNode<R> | null) => (
-    <TableRow key={key} role="row" data-group-footer={group ? String(group.id) : undefined} sx={{ height: rowHeightValue, width: totalWidth }}>
+    <TableRow key={key} role="row" className={gridClasses.aggregationRow} data-group-footer={group ? String(group.id) : undefined} sx={{ height: rowHeightValue, width: totalWidth }}>
       {renderColumns((column, index) => {
         const fn = aggregationModel[column.field];
         const isGroupingCell = group !== null && (column.field === ROW_GROUP_FIELD || column.field === TREE_GROUP_FIELD || column.field === `${ROW_GROUP_FIELD_PREFIX}${group.groupField}__`);
@@ -3493,7 +3622,14 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
           }
         }}
         aria-sort={direction === 'asc' ? 'ascending' : direction === 'desc' ? 'descending' : undefined}
-        className={column.headerClassName}
+        className={cx(
+          gridClasses.columnHeader,
+          sortable && gridClasses['columnHeader--sortable'],
+          direction && gridClasses['columnHeader--sorted'],
+          index < leftCount && gridClasses['columnHeader--pinnedLeft'],
+          index >= rightStart && gridClasses['columnHeader--pinnedRight'],
+          column.headerClassName,
+        )}
         title={column.description}
         draggable={reorderable}
         onDragStart={reorderable ? () => (dragFieldRef.current = column.field) : undefined}
@@ -3521,6 +3657,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
               active={Boolean(direction)}
               direction={direction === 'desc' ? 'desc' : 'asc'}
               hideSortIcon={column.hideSortIcons}
+              className={gridClasses.columnHeaderTitle}
               sx={{ ...ellipsisSx, maxWidth: '100%', flexDirection: headerAlign === 'right' ? 'row-reverse' : 'row' }}
             >
               {content}
@@ -3531,7 +3668,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
               )}
             </TableSortLabel>
           ) : (
-            <Box component="span" sx={{ ...ellipsisSx, maxWidth: '100%' }}>
+            <Box component="span" className={gridClasses.columnHeaderTitle} sx={{ ...ellipsisSx, maxWidth: '100%' }}>
               {content}
             </Box>
           )}
@@ -3688,12 +3825,18 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
   }, [autoSize, paginationModel, setPaginationModel]);
 
   return (
+    <GridApiContext.Provider value={contextApiRef}>
+    <GridRootPropsContext.Provider value={props}>
     <Paper
+      ref={rootElementRef}
       variant="outlined"
       dir={isRtl ? 'rtl' : undefined}
+      className={cx(gridClasses.root, props.className)}
+      style={props.style}
       sx={[
-        (theme) => getBorderVariables(theme),
+        (rootTheme) => getBorderVariables(rootTheme),
         { display: 'flex', flexDirection: 'column', position: 'relative', p: 2, pb: showFooter ? 0 : 2, borderRadius: '8px', '&&': { borderColor: 'var(--DnaDataGrid-border)' } },
+        (rootTheme) => resolveStyleOverrides(themeOverrides, { ownerState: props, theme: rootTheme }) as object,
         ...(Array.isArray(sx) ? sx : [sx]),
       ]}
     >
@@ -3745,6 +3888,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
           <GridLoadingIndicator variant={loadingVariant} label={localeText.loadingLabel} />
         ))}
       <TableContainer
+        className={cx(gridClasses.main, gridClasses.virtualScroller)}
         ref={scrollerRef}
         onScroll={handleScroll}
         onKeyDown={handleKeyDown}
@@ -3767,9 +3911,9 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
           }}
         >
           {!showListView && (
-          <TableHead sx={{ position: 'sticky', top: 0, zIndex: 3, bgcolor: 'background.paper' }}>
+          <TableHead className={gridClasses.columnHeaders} sx={{ position: 'sticky', top: 0, zIndex: 3, bgcolor: 'background.paper' }}>
             {groupHeaderRows.map((cells, level) => (
-              <TableRow key={`group-${level}`} sx={{ height: props.columnGroupHeaderHeight ?? headerHeight }}>
+              <TableRow key={`group-${level}`} className={gridClasses.columnGroupHeader} sx={{ height: props.columnGroupHeaderHeight ?? headerHeight }}>
                 {cells.map((cell) => {
                   const spanWidth = widths.slice(cell.startIndex, cell.startIndex + cell.span).reduce((total, width) => total + width, 0);
                   return (
@@ -3789,7 +3933,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
               {renderColumns(renderHeaderCell)}
             </TableRow>
             {headerFilters && (
-              <TableRow aria-rowindex={headerRowCount} sx={{ height: filterRowHeight }}>
+              <TableRow aria-rowindex={headerRowCount} className={gridClasses.headerFilterRow} sx={{ height: filterRowHeight }}>
                 {renderColumns(renderHeaderFilterCell)}
               </TableRow>
             )}
@@ -3797,7 +3941,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
           )}
 
           {topRows.length > 0 && (
-            <TableBody sx={{ position: 'sticky', top: headerBlockHeight, zIndex: 2, bgcolor: 'background.paper' }}>
+            <TableBody className={cx(gridClasses.pinnedRows, gridClasses['pinnedRows--top'])} sx={{ position: 'sticky', top: headerBlockHeight, zIndex: 2, bgcolor: 'background.paper' }}>
               {topRows.map((row, index) => renderRow(getPinnedRowNode(row), null, headerRowCount + index + 1))}
             </TableBody>
           )}
@@ -3814,6 +3958,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
                 return (
                   <TableRow
                     key={`${entry.node.id}-detail`}
+                    className={gridClasses.detailPanel}
                     ref={entry.auto ? getRowRef(detailKey(entry.node.id)) : undefined}
                     role="row"
                     sx={{ height: entry.auto ? 'auto' : entry.height, width: totalWidth }}
@@ -3835,6 +3980,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
               <TableRow>
                 <TableCell
                   role="gridcell"
+                  className={gridClasses.overlay}
                   sx={{ position: 'sticky', insetInlineStart: 0, width: containerWidth || '100%', minHeight: rowHeight * 2, justifyContent: 'center', color: 'text.secondary' }}
                 >
                   {NoRowsOverlay ? <NoRowsOverlay localeText={localeText} {...slotProps?.noRowsOverlay} /> : localeText.noRowsLabel}
@@ -3855,8 +4001,8 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
         <FooterSlot selectedRowCount={selection.length} rowCount={footerRowCount} localeText={localeText} {...slotProps?.footer} />
       )}
       {showFooter && !FooterSlot && (
-        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderTop: 1, borderColor: 'var(--DnaDataGrid-border)' }}>
-          <Box sx={{ pl: 2, color: 'text.secondary' }}>
+        <Box className={gridClasses.footerContainer} sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderTop: 1, borderColor: 'var(--DnaDataGrid-border)' }}>
+          <Box className={gridClasses.selectedRowCount} sx={{ pl: 2, color: 'text.secondary' }}>
             {!hideFooterSelectedRowCount && selection.length > 0 && (checkboxSelection || rowSelection) ? localeText.footerRowsSelected(selection.length) : null}
           </Box>
           {pagination && !hideFooterPagination && PaginationSlot && (
@@ -3896,6 +4042,8 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
         </Box>
       )}
     </Paper>
+    </GridRootPropsContext.Provider>
+    </GridApiContext.Provider>
   );
 }
 

@@ -141,6 +141,31 @@ Pass one of `frFR`, `deDE`, `esES`, `ptBR`, `jaJP`, `zhCN` or `arSD` to `localeT
 
 `apiRef.current` also has `showFilterPanel`, `hideFilterPanel`, `showPreferences`, `showColumnMenu`, `hideColumnMenu`, `toggleColumnMenu`, `upsertFilterItem(s)`, `deleteFilterItem`, `setFilterLogicOperator`, `sortColumn`, `getSortedRowIds`, `getSortedRows`, `getRowIdFromRowIndex`, `setColumnVisibilityModel`, `setEditCellValue`, `getCellMode`, `getRowMode`, `getRowParams`, `getCellParams`, `getColumnHeaderParams`, `getRowNode`, `getRowGroupChildren`, `addRowGroupingCriteria`, `removeRowGroupingCriteria`, `setRowGroupingCriteriaIndex`, `setColumnHeaderFocus`, `setRows`, `updateColumns`, `selectRowRange`, `selectCellRange`, `setExpandedDetailPanels`, `setAllRowChildrenExpansion`, `isColumnPinned`, `getColumnPosition`, `getRootDimensions`, `getLocaleText`, `getRowElement`, `getCellElement`, `getColumnHeaderElement`, `getRowValue`, `getRowFormattedValue`, `isRowSelectable`, `publishEvent`, `getAggregationModel`, `getRowGroupingModel` and `getColumnVisibilityModel`.
 
+## Styling and theming like MUI X
+
+The grid's parts carry MUI X's class names (`MuiDataGrid-root`, `MuiDataGrid-row`, `MuiDataGrid-cell`, `MuiDataGrid-columnHeader` and the rest of `gridClasses`), so CSS written for MUI X carries over. `theme.components.MuiDataGrid` takes `defaultProps` and `styleOverrides` by those slots:
+
+```tsx
+import type {} from '@dna/data-grid/themeAugmentation';
+
+const theme = createTheme({
+  components: {
+    MuiDataGrid: {
+      defaultProps: { density: 'compact' },
+      styleOverrides: { columnHeader: { fontWeight: 700 }, cell: ({ theme }) => ({ color: theme.palette.text.secondary }) },
+    },
+  },
+});
+```
+
+The `themeAugmentation` import types `MuiDataGrid` in the theme. Leave it out in a project that also imports MUI X's, since both declare the same key.
+
+## State, selectors and custom slots
+
+`apiRef.current.state` holds the grid state, and selectors with MUI X's names read it, such as `gridSortModelSelector`, `gridFilteredSortedRowIdsSelector`, `gridPaginatedVisibleSortedGridRowIdsSelector`, `gridRowSelectionStateSelector` and `gridVisibleColumnFieldsSelector`. Inside a custom slot, `useGridApiContext()` returns the grid's `apiRef`, `useGridSelector(apiRef, selector)` keeps a value up to date, `useGridApiEventHandler(apiRef, event, handler)` listens to an event, and `useGridRootProps()` returns the grid's props.
+
+`subscribeEvent` also reports `stateChange` and the model events MUI X publishes: `sortModelChange`, `filterModelChange`, `paginationModelChange`, `rowSelectionChange`, `columnVisibilityModelChange`, `densityChange`, `columnOrderChange`, `columnWidthChange`, `pinnedColumnsChange`, `rowGroupingModelChange`, `aggregationModelChange`, `detailPanelsExpandedRowIdsChange`, `rowExpansionChange`, `cellFocusIn` and `columnHeaderFocus`.
+
 ## Scripts
 
 | Command | Description |

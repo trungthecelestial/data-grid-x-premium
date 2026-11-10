@@ -18,6 +18,16 @@
         "types": "./dist/index.d.cts",
         "default": "./dist/index.cjs"
       }
+    },
+    "./themeAugmentation": {
+      "import": {
+        "types": "./dist/themeAugmentation.d.mts",
+        "default": "./dist/themeAugmentation.mjs"
+      },
+      "require": {
+        "types": "./dist/themeAugmentation.d.cts",
+        "default": "./dist/themeAugmentation.cjs"
+      }
     }
   },
   "files": ["dist"],

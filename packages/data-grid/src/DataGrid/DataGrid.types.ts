@@ -1,5 +1,5 @@
 import type { SxProps, Theme } from '@mui/material/styles';
-import type { ComponentType, KeyboardEvent, MouseEvent, MutableRefObject, ReactNode } from 'react';
+import type { ComponentType, CSSProperties, KeyboardEvent, MouseEvent, MutableRefObject, ReactNode } from 'react';
 
 export type GridRowId = string | number;
 
@@ -305,12 +305,64 @@ export interface GridEventMap {
   rowEditStart: [params: { id: GridRowId }];
   rowEditStop: [params: { id: GridRowId; reason: GridEditStopReason }];
   rowsScrollEnd: [params: { visibleRowsCount: number; viewportPageSize: number }];
+  /** The grid state changed. `useGridSelector` listens to this. */
+  stateChange: [state: GridState];
+  sortModelChange: [model: GridSortModel];
+  filterModelChange: [model: GridFilterModel];
+  paginationModelChange: [model: GridPaginationModel];
+  rowSelectionChange: [model: GridRowSelectionModel];
+  columnVisibilityModelChange: [model: GridColumnVisibilityModel];
+  densityChange: [density: GridDensity];
+  columnOrderChange: [params: { orderedFields: string[] }];
+  columnWidthChange: [params: { field: string; width: number }];
+  pinnedColumnsChange: [model: GridPinnedColumns];
+  rowGroupingModelChange: [model: string[]];
+  aggregationModelChange: [model: GridAggregationModel];
+  detailPanelsExpandedRowIdsChange: [ids: GridRowId[]];
+  rowExpansionChange: [params: { id: GridRowId; isExpanded: boolean }];
+  cellFocusIn: [params: { id: GridRowId; field: string }];
+  columnHeaderFocus: [params: { field: string }];
   /** An undo step was applied. `rows` holds each changed row as it is now. */
   undo: [params: GridHistoryEventParams];
   redo: [params: GridHistoryEventParams];
 }
 
 export type GridEventName = keyof GridEventMap;
+
+/** A snapshot of the grid, rebuilt when something in it changes. Read it with the `grid*Selector` functions or `useGridSelector`. */
+export interface GridState {
+  rows: {
+    /** Every row id, in the order of `rows`. */
+    ids: GridRowId[];
+    totalRowCount: number;
+    lookup: Readonly<Record<string, GridValidRowModel>>;
+  };
+  sorting: { sortModel: GridSortModel; sortedRowIds: GridRowId[] };
+  filter: { filterModel: GridFilterModel; filteredRowIds: GridRowId[] };
+  pagination: { paginationModel: GridPaginationModel; rowCount: number };
+  /** Ids of the rows on the current page, in display order, expanded children included. */
+  visibleRowIds: GridRowId[];
+  columns: {
+    orderedFields: string[];
+    columnVisibilityModel: GridColumnVisibilityModel;
+    lookup: Readonly<Record<string, GridColDef<any>>>;
+    /** Fields of the columns that show, generated ones such as the checkbox column included. */
+    visibleFields: string[];
+    dimensions: Readonly<Record<string, { width: number }>>;
+  };
+  pinnedColumns: GridPinnedColumns;
+  density: GridDensity;
+  rowSelection: GridRowSelectionModel;
+  cellSelection: GridCellSelectionModel;
+  aggregation: { model: GridAggregationModel };
+  rowGrouping: { model: string[] };
+  pivoting: { active: boolean; model: GridPivotModel };
+  detailPanel: { expandedRowIds: GridRowId[] };
+  editing: { id: GridRowId; field: string | null; values: Record<string, unknown> } | null;
+  focus: { cell: { id: GridRowId; field: string } | null; columnHeader: { field: string } | null };
+  preferencePanel: { open: boolean; openedPanelValue: 'filters' | 'columns' | 'pivot' | null };
+  columnMenu: { open: boolean; field: string | null };
+}
 
 export interface GridHistoryEventParams {
   rows: { id: GridRowId; row: GridValidRowModel }[];
@@ -758,6 +810,10 @@ export interface GridApi {
   /** Listens to a grid event. Returns the function that stops listening. */
   /** Undo and redo of edits and pastes. */
   history: GridHistoryApi;
+  /** The current state. Read it through selectors such as `gridSortModelSelector(apiRef)`. */
+  state: GridState;
+  /** The grid's root element. */
+  rootElementRef: { current: HTMLDivElement | null };
 
   /** Opens the filter panel. With a field, adds a filter for that column when it has none. */
   showFilterPanel: (field?: string) => void;
@@ -953,6 +1009,9 @@ export interface DataGridProps<R extends GridValidRowModel = GridValidRowModel> 
   loading?: boolean;
   localeText?: Partial<GridLocaleText>;
   sx?: SxProps<Theme>;
+  /** Added to the root next to `MuiDataGrid-root`. */
+  className?: string;
+  style?: CSSProperties;
 
   /** Height of the scrolling area in px. Defaults to 400. Ignored with `autoHeight`. */
   height?: number | string;

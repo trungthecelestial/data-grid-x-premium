@@ -12,3 +12,5 @@ export { GridDataSourceCacheDefault } from './features/dataSourceCache';
 export type * from './DataGrid.types';
 export { getDefaultPivotDerivedColumns } from './features/pivot';
 export { arSD, deDE, esES, frFR, getGridLocalization, jaJP, ptBR, zhCN } from './locales';
+export { gridClasses, type GridClassKey } from './gridClasses';
+export * from './gridState';

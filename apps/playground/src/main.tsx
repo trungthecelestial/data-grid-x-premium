@@ -17,6 +17,8 @@ import {
   type GridDataSourceGetRowsParams,
   type GridLocaleText,
 } from '@dna/data-grid';
+// Types `theme.components.MuiDataGrid` for the themes below.
+import type {} from '@dna/data-grid/themeAugmentation';
 import { dnaTheme } from '@dna/dna-ui';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
