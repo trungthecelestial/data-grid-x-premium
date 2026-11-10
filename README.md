@@ -19,6 +19,91 @@ pnpm install
 pnpm dev
 ```
 
+## Using the grid in your app
+
+`@dna/data-grid` is not on a public registry yet, so install it from this repository.
+
+### 1. Add the package
+
+Build it once, then pack it and install the tarball in your app:
+
+```bash
+# in this repository
+pnpm install
+pnpm --filter @dna/data-grid build
+cd packages/data-grid && pnpm pack        # writes dna-data-grid-0.0.0.tgz
+
+# in your app
+pnpm add /path/to/dna-data-grid-0.0.0.tgz
+```
+
+Inside a pnpm workspace that contains this repository, `"@dna/data-grid": "workspace:*"` works instead. If you publish the package to your own registry, install it from there as usual.
+
+### 2. Install the peer dependencies
+
+The grid is built on MUI, and your app provides it:
+
+```bash
+pnpm add @mui/material @mui/icons-material @emotion/react @emotion/styled react react-dom
+```
+
+It needs React 18 or newer and MUI 7. It ships ESM and CommonJS builds with types, and has no other runtime dependencies. Charts, Excel export and pivoting are built in.
+
+### 3. Render it
+
+Rows need an `id`, or pass `getRowId`. The grid fills the width of its parent and is 400px tall unless you set `height` (or `autoHeight`).
+
+```tsx
+import { DataGrid, type GridColDef } from '@dna/data-grid';
+
+type Employee = { id: number; name: string; team: string; salary: number };
+
+const columns: GridColDef<Employee>[] = [
+  { field: 'name', headerName: 'Name', flex: 1 },
+  { field: 'team', headerName: 'Team', width: 140 },
+  { field: 'salary', headerName: 'Salary', type: 'number', width: 120 },
+];
+
+export function EmployeeTable({ rows }: { rows: Employee[] }) {
+  return <DataGrid rows={rows} columns={columns} showToolbar height={480} />;
+}
+```
+
+Wrap your app in MUI's `ThemeProvider` to theme it. The grid reads its colors and typography from the theme. To set grid defaults and style overrides in `createTheme`, add `import type {} from '@dna/data-grid/themeAugmentation';` once so `components.MuiDataGrid` type-checks.
+
+### 4. Turn on more features
+
+Features are props. Most are off until you ask for them:
+
+| To get | Add |
+| --- | --- |
+| Toolbar with columns, filters, density, export and quick filter | `showToolbar` |
+| Checkbox selection | `checkboxSelection` |
+| Range selection and copy/paste | `cellSelection` |
+| Row grouping, aggregation | `initialState={{ rowGrouping, aggregation }}` |
+| Pivot table | `initialState.pivoting`, see [Pivoting](#pivoting) |
+| Charts | `chartsIntegration`, see [Charts](#charts) |
+| Server-side data | `dataSource`, see [Server-side data](#server-side-data) |
+| Another language | `localeText={frFR}`, with `deDE`, `esES`, `ptBR`, `jaJP`, `zhCN` and `arSD` also exported |
+
+Read and drive the grid from code with `useGridApiRef()`:
+
+```tsx
+import { DataGrid, useGridApiRef } from '@dna/data-grid';
+
+const apiRef = useGridApiRef();
+// ...
+<DataGrid apiRef={apiRef} rows={rows} columns={columns} />;
+// later
+apiRef.current.exportDataAsCsv();
+```
+
+`apiRef.current.exportState()` and `restoreState()` save and restore sorting, filters, columns, grouping, pivoting and charts, for example to keep a user's view in local storage.
+
+### Working on the library
+
+The sections below describe each feature in detail. To change the grid itself, use the commands in [Getting started](#getting-started): `pnpm dev` rebuilds the library and runs the playground app, which already imports it as a workspace package.
+
 ## Pivoting
 
 Set `pivotModel` and `pivotActive`, seed them through `initialState.pivoting`, or let users build the table from the Pivot button in the toolbar.
