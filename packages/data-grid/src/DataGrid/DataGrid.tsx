@@ -216,8 +216,8 @@ const getBorderVariables = (theme: Theme) => {
   const lightDivider = schemes?.light?.palette?.divider ?? theme.palette.divider;
   const darkDivider = schemes?.dark?.palette?.divider ?? theme.palette.divider;
   return {
-    '--DnaDataGrid-border': lighten(alpha(lightDivider, 1), 0.88),
-    ...theme.applyStyles('dark', { '--DnaDataGrid-border': darken(alpha(darkDivider, 1), 0.68) }),
+    '--TstackDataGrid-border': lighten(alpha(lightDivider, 1), 0.88),
+    ...theme.applyStyles('dark', { '--TstackDataGrid-border': darken(alpha(darkDivider, 1), 0.68) }),
   };
 };
 
@@ -3350,7 +3350,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
       insetInlineEnd: pin === 'right' ? rightOffsets[index] : undefined,
       zIndex: pin ? (header ? 4 : 2) : undefined,
       bgcolor: pin ? 'background.paper' : undefined,
-      borderInlineEnd: (header ? showColumnVerticalBorder : showCellVerticalBorder) ? '1px solid var(--DnaDataGrid-border)' : undefined,
+      borderInlineEnd: (header ? showColumnVerticalBorder : showCellVerticalBorder) ? '1px solid var(--TstackDataGrid-border)' : undefined,
       ...ellipsisSx,
     } as const;
   };
@@ -3623,7 +3623,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
                   alignSelf: 'flex-start',
                   bgcolor: 'background.paper',
                   zIndex: index < leftCount || index >= rightStart ? 3 : 1,
-                  borderBottom: '1px solid var(--DnaDataGrid-border)',
+                  borderBottom: '1px solid var(--TstackDataGrid-border)',
                 }),
                 outlineOffset: -2,
                 '&:focus-visible': { outline: '2px solid', outlineColor: 'primary.main' },
@@ -3716,7 +3716,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
           flexDirection: headerAlign === 'right' ? 'row-reverse' : 'row',
           justifyContent: 'space-between',
           // The menu button takes no room until it shows, so it does not squeeze the header text.
-          '&:hover .DnaDataGrid-menuButton, &:focus-within .DnaDataGrid-menuButton': menuButtonShownSx,
+          '&:hover .TstackDataGrid-menuButton, &:focus-within .TstackDataGrid-menuButton': menuButtonShownSx,
         }}
       >
         <Box sx={{ display: 'flex', flexDirection: 'column', minWidth: 0, flex: 1, alignItems: JUSTIFY[headerAlign] }}>
@@ -3748,7 +3748,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
         </Box>
         {hasColumnMenu(column) && (
           <IconButton
-            className="DnaDataGrid-menuButton"
+            className="TstackDataGrid-menuButton"
             size="small"
             aria-label={`${column.headerName ?? column.field} ${localeText.columnMenuLabel}`}
             aria-haspopup="menu"
@@ -3793,7 +3793,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
                 width: 2,
                 height: 24,
                 transform: 'translateY(-50%)',
-                bgcolor: 'var(--DnaDataGrid-border)',
+                bgcolor: 'var(--TstackDataGrid-border)',
               },
             }}
           />
@@ -3905,7 +3905,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
       style={props.style}
       sx={[
         (rootTheme) => getBorderVariables(rootTheme),
-        { display: 'flex', flexDirection: 'column', position: 'relative', p: 2, pb: showFooter ? 0 : 2, borderRadius: '8px', '&&': { borderColor: 'var(--DnaDataGrid-border)' } },
+        { display: 'flex', flexDirection: 'column', position: 'relative', p: 2, pb: showFooter ? 0 : 2, borderRadius: '8px', '&&': { borderColor: 'var(--TstackDataGrid-border)' } },
         (rootTheme) => resolveStyleOverrides(themeOverrides, { ownerState: props, theme: rootTheme }) as object,
         ...(Array.isArray(sx) ? sx : [sx]),
       ]}
@@ -3987,7 +3987,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
             width: totalWidth,
             minWidth: '100%',
             '& .MuiTableHead-root, & .MuiTableBody-root, & .MuiTableFooter-root': { display: 'block', padding: 0 },
-            '& .MuiTableRow-root': { width: totalWidth, borderBottomColor: 'var(--DnaDataGrid-border)' },
+            '& .MuiTableRow-root': { width: totalWidth, borderBottomColor: 'var(--TstackDataGrid-border)' },
             '& .MuiTableHead-root .MuiTableCell-root': { fontWeight: 600 },
             '& .MuiTableCell-root': { paddingBlock: 0, paddingInline: '10px', boxSizing: 'border-box' },
           }}
@@ -4083,7 +4083,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
         <FooterSlot selectedRowCount={selection.length} rowCount={footerRowCount} localeText={localeText} {...slotProps?.footer} />
       )}
       {showFooter && !FooterSlot && (
-        <Box className={gridClasses.footerContainer} sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderTop: 1, borderColor: 'var(--DnaDataGrid-border)' }}>
+        <Box className={gridClasses.footerContainer} sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderTop: 1, borderColor: 'var(--TstackDataGrid-border)' }}>
           <Box className={gridClasses.selectedRowCount} sx={{ pl: 2, color: 'text.secondary' }}>
             {!hideFooterSelectedRowCount && selection.length > 0 && (checkboxSelection || rowSelection) ? localeText.footerRowsSelected(selection.length) : null}
           </Box>

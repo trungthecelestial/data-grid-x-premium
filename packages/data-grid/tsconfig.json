@@ -1,4 +1,4 @@
 {
-  "extends": "@dna/typescript-config/react-library.json",
+  "extends": "@tstack/typescript-config/react-library.json",
   "include": ["src", "tsdown.config.ts", "vitest.config.ts"]
 }

@@ -17,7 +17,7 @@ type Zone = keyof GridPivotModel;
 /** Where a dragged field comes from or goes to. `fields` is the list of unused fields. */
 type DropArea = Zone | 'fields';
 
-const DRAG_TYPE = 'application/x-dna-pivot-field';
+const DRAG_TYPE = 'application/x-tstack-pivot-field';
 
 /**
  * The model after moving `field` from one area to another, before the item at `index` (or at the end).

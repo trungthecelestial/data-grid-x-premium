@@ -16,10 +16,9 @@ import {
   type GridDataSource,
   type GridDataSourceGetRowsParams,
   type GridLocaleText,
-} from '@dna/data-grid';
+} from '@tstack/data-grid';
 // Types `theme.components.MuiDataGrid` for the themes below.
-import type {} from '@dna/data-grid/themeAugmentation';
-import { dnaTheme } from '@dna/dna-ui';
+import type {} from '@tstack/data-grid/themeAugmentation';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
 import CssBaseline from '@mui/material/CssBaseline';
@@ -70,6 +69,9 @@ const columns: GridColDef<Employee>[] = [
   { field: 'remote', headerName: 'Remote', width: 100, type: 'boolean', editable: true },
   { field: 'joined', headerName: 'Joined', width: 140, type: 'date', editable: true },
 ];
+
+/** The stock MUI theme. Swap in your own `createTheme(...)` to see the grid styled like your app. */
+const muiTheme = createTheme();
 
 function Overview() {
   const apiRef = useGridApiRef();
@@ -508,7 +510,7 @@ function Locales() {
   const rtl = name.includes('RTL');
   // The locale comes from the theme, the way an app would set it once for every grid.
   const theme = useMemo(
-    () => createTheme(dnaTheme, getGridLocalization(LOCALES[name] ?? DEFAULT_LOCALE_TEXT), rtl ? { direction: 'rtl' } : {}),
+    () => createTheme(muiTheme, getGridLocalization(LOCALES[name] ?? DEFAULT_LOCALE_TEXT), rtl ? { direction: 'rtl' } : {}),
     [name, rtl],
   );
   const grid = (
@@ -559,7 +561,7 @@ function App() {
   return (
     <Box sx={{ maxWidth: 1100, mx: 'auto', p: 3 }}>
       <Typography variant="h5" component="h1" gutterBottom>
-        DNA Data Grid
+        TStack Data Grid
       </Typography>
       <Tabs value={tab} onChange={(_, value: number) => setTab(value)} variant="scrollable"
         // A disabled scroll arrow keeps its 40px of room, which shows as a gap before the first tab.
@@ -576,7 +578,7 @@ function App() {
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <ThemeProvider theme={dnaTheme}>
+    <ThemeProvider theme={muiTheme}>
       <CssBaseline />
       <App />
     </ThemeProvider>

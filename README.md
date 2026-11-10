@@ -1,4 +1,4 @@
-# DNA Data Grid
+# TStack Data Grid
 
 A React data grid inspired by the features, structure and usage of [MUI X Data Grid](https://mui.com/x/react-data-grid/).
 
@@ -6,7 +6,7 @@ A React data grid inspired by the features, structure and usage of [MUI X Data G
 
 | Path | Description |
 | --- | --- |
-| `packages/data-grid` | `@dna/data-grid`, the grid library |
+| `packages/data-grid` | `@tstack/data-grid`, the grid library |
 | `packages/typescript-config` | Shared `tsconfig` presets |
 | `apps/playground` | Vite app for trying the grid during development |
 
@@ -21,7 +21,7 @@ pnpm dev
 
 ## Using the grid in your app
 
-`@dna/data-grid` is not on a public registry yet, so install it from this repository.
+`@tstack/data-grid` is not on a public registry yet, so install it from this repository.
 
 ### 1. Add the package
 
@@ -30,14 +30,14 @@ Build it once, then pack it and install the tarball in your app:
 ```bash
 # in this repository
 pnpm install
-pnpm --filter @dna/data-grid build
-cd packages/data-grid && pnpm pack        # writes dna-data-grid-0.0.0.tgz
+pnpm --filter @tstack/data-grid build
+cd packages/data-grid && pnpm pack        # writes tstack-data-grid-0.0.0.tgz
 
 # in your app
-pnpm add /path/to/dna-data-grid-0.0.0.tgz
+pnpm add /path/to/tstack-data-grid-0.0.0.tgz
 ```
 
-Inside a pnpm workspace that contains this repository, `"@dna/data-grid": "workspace:*"` works instead. If you publish the package to your own registry, install it from there as usual.
+Inside a pnpm workspace that contains this repository, `"@tstack/data-grid": "workspace:*"` works instead. If you publish the package to your own registry, install it from there as usual.
 
 ### 2. Install the peer dependencies
 
@@ -54,7 +54,7 @@ It needs React 18 or newer and MUI 7. It ships ESM and CommonJS builds with type
 Rows need an `id`, or pass `getRowId`. The grid fills the width of its parent and is 400px tall unless you set `height` (or `autoHeight`).
 
 ```tsx
-import { DataGrid, type GridColDef } from '@dna/data-grid';
+import { DataGrid, type GridColDef } from '@tstack/data-grid';
 
 type Employee = { id: number; name: string; team: string; salary: number };
 
@@ -69,7 +69,7 @@ export function EmployeeTable({ rows }: { rows: Employee[] }) {
 }
 ```
 
-Wrap your app in MUI's `ThemeProvider` to theme it. The grid reads its colors and typography from the theme. To set grid defaults and style overrides in `createTheme`, add `import type {} from '@dna/data-grid/themeAugmentation';` once so `components.MuiDataGrid` type-checks.
+Wrap your app in MUI's `ThemeProvider` to theme it. The grid reads its colors and typography from the theme. To set grid defaults and style overrides in `createTheme`, add `import type {} from '@tstack/data-grid/themeAugmentation';` once so `components.MuiDataGrid` type-checks.
 
 ### 4. Turn on more features
 
@@ -89,7 +89,7 @@ Features are props. Most are off until you ask for them:
 Read and drive the grid from code with `useGridApiRef()`:
 
 ```tsx
-import { DataGrid, useGridApiRef } from '@dna/data-grid';
+import { DataGrid, useGridApiRef } from '@tstack/data-grid';
 
 const apiRef = useGridApiRef();
 // ...
@@ -256,7 +256,7 @@ Pass one of `frFR`, `deDE`, `esES`, `ptBR`, `jaJP`, `zhCN` or `arSD` to `localeT
 The grid's parts carry MUI X's class names (`MuiDataGrid-root`, `MuiDataGrid-row`, `MuiDataGrid-cell`, `MuiDataGrid-columnHeader` and the rest of `gridClasses`), so CSS written for MUI X carries over. `theme.components.MuiDataGrid` takes `defaultProps` and `styleOverrides` by those slots:
 
 ```tsx
-import type {} from '@dna/data-grid/themeAugmentation';
+import type {} from '@tstack/data-grid/themeAugmentation';
 
 const theme = createTheme({
   components: {

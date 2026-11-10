@@ -1,5 +1,5 @@
 {
-  "name": "@dna/typescript-config",
+  "name": "@tstack/typescript-config",
   "version": "0.0.0",
   "private": true,
   "files": ["base.json", "react-library.json"]

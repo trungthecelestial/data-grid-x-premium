@@ -1,5 +1,5 @@
 {
-  "name": "dna-data-grid",
+  "name": "tstack-data-grid",
   "private": true,
   "packageManager": "pnpm@10.18.0",
   "engines": {

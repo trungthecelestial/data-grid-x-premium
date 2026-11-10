@@ -1,7 +1,7 @@
 /**
  * Opt-in theme typing, as `@mui/x-data-grid/themeAugmentation` does. Import it once in a project that themes the grid:
  *
- *   import type {} from '@dna/data-grid/themeAugmentation';
+ *   import type {} from '@tstack/data-grid/themeAugmentation';
  *
  * Then `createTheme({ components: { MuiDataGrid: { defaultProps, styleOverrides } } })` type-checks.
  * Leave it out in a project that also uses MUI X's augmentation, since both declare `MuiDataGrid`.
