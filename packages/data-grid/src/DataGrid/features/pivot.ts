@@ -5,6 +5,7 @@ import type {
   GridColDef,
   GridColumnGroupChild,
   GridColumnGroupingModel,
+  GridPivotColumnNode,
   GridPivotModel,
   GridRowId,
   GridValidRowModel,
@@ -20,6 +21,61 @@ export const PIVOT_ROW_PATH = '__pivotRowPath';
 const PIVOT_COLUMN_WIDTH = 130;
 
 export const EMPTY_PIVOT_MODEL: GridPivotModel = { rows: [], columns: [], values: [] };
+
+const toDate = (value: unknown): Date | null => {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+  const date = value instanceof Date ? value : new Date(value as string | number);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+/** The fields a date column offers to pivoting by default: its year and its quarter. */
+export function getDefaultPivotDerivedColumns<R extends GridValidRowModel>(column: GridColDef<R>): GridColDef<R>[] | undefined {
+  if (column.type !== 'date' && column.type !== 'dateTime') {
+    return undefined;
+  }
+  const name = column.headerName ?? column.field;
+  const dateOf = (row: R) => toDate(getCellValue(row, column));
+  return [
+    {
+      field: `${column.field}-year`,
+      headerName: `${name} (Year)`,
+      type: 'number',
+      valueGetter: (_value, row) => dateOf(row)?.getFullYear() ?? null,
+      // No thousands separator in a year.
+      valueFormatter: (value) => (value === null || value === undefined ? '' : String(value)),
+      pivotable: true,
+    },
+    {
+      field: `${column.field}-quarter`,
+      headerName: `${name} (Quarter)`,
+      type: 'number',
+      valueGetter: (_value, row) => {
+        const date = dateOf(row);
+        return date ? Math.floor(date.getMonth() / 3) + 1 : null;
+      },
+      valueFormatter: (value) => (value === null || value === undefined ? '' : `Q${value}`),
+      pivotable: true,
+    },
+  ];
+}
+
+/** The source columns with each one's derived fields right after it. Derived fields only serve pivoting. */
+export function withPivotDerivedColumns<R extends GridValidRowModel>(
+  columns: readonly GridColDef<R>[],
+  getDerived: (column: GridColDef<R>) => GridColDef<R>[] | undefined,
+): GridColDef<R>[] {
+  const known = new Set(columns.map((column) => column.field));
+  return columns.flatMap((column) => {
+    if (column.pivotable === false) {
+      return [column];
+    }
+    const derived = (getDerived(column) ?? []).filter((candidate) => !known.has(candidate.field));
+    derived.forEach((candidate) => known.add(candidate.field));
+    return [column, ...derived];
+  });
+}
 
 export const isPivotModelEmpty = (model: GridPivotModel) =>
   model.rows.length === 0 && model.columns.length === 0 && model.values.length === 0;
@@ -85,8 +141,11 @@ export function computePivot<R extends GridValidRowModel>(params: {
   model: GridPivotModel;
   functions: GridAggregationFunctions;
   totalLabel: string;
+  pivotingColDef?:
+    | Partial<GridColDef>
+    | ((params: { field: string; aggFunc: GridAggregationFunction; columnGroupPath: string[] }) => Partial<GridColDef> | undefined);
 }): GridPivotResult {
-  const { rows, columns, model, functions, totalLabel } = params;
+  const { rows, columns, model, functions, totalLabel, pivotingColDef } = params;
 
   const rowColumns = model.rows.flatMap(({ field }) => columns.get(field) ?? []);
   const columnLevels = model.columns.flatMap(({ field, sort }) => {
@@ -137,12 +196,14 @@ export function computePivot<R extends GridValidRowModel>(params: {
 
   // Walking the sorted column tree gives the generated columns and their nested header groups together.
   const valueByField = new Map<string, PivotValue>();
+  const pathByField = new Map<string, string[]>();
   const derivedFields: string[] = [];
   const visitColumns = (bucket: ColumnBucket, path: string[], depth: number): GridColumnGroupChild[] => {
     if (depth === columnLevels.length) {
       return values.map((value) => {
         const field = getDerivedField(path, value.column.field);
         valueByField.set(field, value);
+        pathByField.set(field, path);
         derivedFields.push(field);
         return { field };
       });
@@ -206,8 +267,11 @@ export function computePivot<R extends GridValidRowModel>(params: {
 
   const derivedColumns = derivedFields.map((field): GridColDef => {
     const { column, fn, def } = valueByField.get(field) as PivotValue;
+    const override =
+      typeof pivotingColDef === 'function'
+        ? pivotingColDef({ field: column.field, aggFunc: fn, columnGroupPath: pathByField.get(field) ?? [] })
+        : pivotingColDef;
     return {
-      field,
       headerName: column.headerName ?? column.field,
       // The result of a function can differ from its input, as with the count of a text column.
       type: numericFields.has(field) && !nonNumericFields.has(field) ? 'number' : column.type,
@@ -216,6 +280,9 @@ export function computePivot<R extends GridValidRowModel>(params: {
       filterable: false,
       disableReorder: true,
       valueFormatter: (value: unknown) => formatAggregate(fn, value, column, def),
+      // The field keys the generated values, so an override cannot change it.
+      ...override,
+      field,
     };
   });
 
@@ -233,5 +300,74 @@ export function computePivot<R extends GridValidRowModel>(params: {
       headerName: rowHeaderName,
       valueGetter: (_value: unknown, row: GridValidRowModel) => (row[PIVOT_ROW_PATH] as string[]).join(' / '),
     },
+  };
+}
+
+export const defaultPivotColumnField = ({ columnPath, field }: { columnPath: string[]; field: string }) => [...columnPath, field].join('>->');
+
+/** Columns of a pivot table that the server calculated: what the grid needs to show the rows it returned. */
+export interface GridServerPivotLayout {
+  columns: GridColDef[];
+  columnGroupingModel: GridColumnGroupingModel | undefined;
+  /** Function per generated field, so group rows and the footer show their values as aggregates. */
+  aggregationModel: GridAggregationModel;
+  rowHeaderName: string;
+}
+
+/** Builds the generated columns from the model and the column tree a server returned. */
+export function buildServerPivotLayout(params: {
+  model: GridPivotModel;
+  columns: ReadonlyMap<string, GridColDef<any>>;
+  pivotColumns: readonly GridPivotColumnNode[] | undefined;
+  functions: GridAggregationFunctions;
+  getField?: (params: { columnPath: string[]; field: string; aggFunc: GridAggregationFunction }) => string;
+  pivotingColDef?: Parameters<typeof computePivot>[0]['pivotingColDef'];
+}): GridServerPivotLayout {
+  const { model, columns, pivotColumns, functions, getField = defaultPivotColumnField, pivotingColDef } = params;
+  const values = model.values.flatMap(({ field, aggFunc }) => {
+    const column = columns.get(field);
+    return column ? [{ column, fn: aggFunc, def: functions[aggFunc] }] : [];
+  });
+  const levels = model.columns.length;
+  const generated: GridColDef[] = [];
+  const aggregationModel: GridAggregationModel = {};
+
+  const valueColumns = (path: string[]): GridColumnGroupChild[] =>
+    values.map(({ column, fn, def }) => {
+      const field = getField({ columnPath: path, field: column.field, aggFunc: fn });
+      aggregationModel[field] = fn;
+      const override =
+        typeof pivotingColDef === 'function' ? pivotingColDef({ field: column.field, aggFunc: fn, columnGroupPath: path }) : pivotingColDef;
+      generated.push({
+        headerName: column.headerName ?? column.field,
+        type: fn === 'size' ? 'number' : column.type,
+        valueOptions: column.valueOptions,
+        width: PIVOT_COLUMN_WIDTH,
+        sortable: false,
+        filterable: false,
+        disableReorder: true,
+        valueFormatter: (value: unknown) => formatAggregate(fn, value, column, def),
+        ...override,
+        field,
+      });
+      return { field };
+    });
+
+  const visit = (nodes: readonly GridPivotColumnNode[], path: string[], depth: number): GridColumnGroupChild[] =>
+    nodes.map((node) => {
+      const nodePath = [...path, node.key];
+      return {
+        groupId: `pivot-group:${JSON.stringify(nodePath)}`,
+        headerName: node.label ?? node.key,
+        children: depth + 1 < levels ? visit(node.children ?? [], nodePath, depth + 1) : valueColumns(nodePath),
+      };
+    });
+
+  const groups = levels > 0 ? visit(pivotColumns ?? [], [], 0) : valueColumns([]);
+  return {
+    columns: generated,
+    columnGroupingModel: levels > 0 ? (groups as GridColumnGroupingModel) : undefined,
+    aggregationModel,
+    rowHeaderName: model.rows.map(({ field }) => columns.get(field)?.headerName ?? field).join(' / '),
   };
 }

@@ -2,6 +2,8 @@ import ClearIcon from '@mui/icons-material/Clear';
 import FileDownloadIcon from '@mui/icons-material/FileDownload';
 import FilterListIcon from '@mui/icons-material/FilterList';
 import PivotTableChartIcon from '@mui/icons-material/PivotTableChart';
+import RedoIcon from '@mui/icons-material/Redo';
+import UndoIcon from '@mui/icons-material/Undo';
 import SearchIcon from '@mui/icons-material/Search';
 import TableRowsIcon from '@mui/icons-material/TableRows';
 import ViewColumnIcon from '@mui/icons-material/ViewColumn';
@@ -47,6 +49,11 @@ export function GridToolbar<R extends GridValidRowModel = GridValidRowModel>(pro
     disableExport,
     onOpenPivotPanel,
     pivotActive = false,
+    onUndo,
+    onRedo,
+    canUndo = false,
+    canRedo = false,
+    disableMultipleColumnsFiltering = false,
   } = props;
 
   const [panel, setPanel] = useState<PanelName>(null);
@@ -118,6 +125,16 @@ export function GridToolbar<R extends GridValidRowModel = GridValidRowModel>(pro
           {localeText.toolbarExport}
         </Button>
       )}
+      {onUndo && (
+        <IconButton size="small" aria-label={localeText.toolbarUndo} title={localeText.toolbarUndo} disabled={!canUndo} onClick={onUndo}>
+          <UndoIcon fontSize="small" />
+        </IconButton>
+      )}
+      {onRedo && (
+        <IconButton size="small" aria-label={localeText.toolbarRedo} title={localeText.toolbarRedo} disabled={!canRedo} onClick={onRedo}>
+          <RedoIcon fontSize="small" />
+        </IconButton>
+      )}
       <Box sx={{ flex: 1, order: -1 }} />
       {!disableQuickFilter && (
         <TextField
@@ -176,6 +193,7 @@ export function GridToolbar<R extends GridValidRowModel = GridValidRowModel>(pro
         anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
       >
         <GridFilterPanel
+          disableMultipleFilters={disableMultipleColumnsFiltering}
           columns={filterColumns}
           filterModel={filterModel}
           onFilterModelChange={onFilterModelChange}

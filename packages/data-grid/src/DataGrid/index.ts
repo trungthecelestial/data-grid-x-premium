@@ -1,4 +1,4 @@
-export { DataGrid, useGridApiRef } from './DataGrid';
+export { DataGrid, GRID_THEME_COMPONENT_NAME, useGridApiRef } from './DataGrid';
 export { GridToolbar } from './components/GridToolbar';
 export { GridColumnsPanel } from './components/GridColumnsPanel';
 export { GridColumnMenu } from './components/GridColumnMenu';
@@ -10,3 +10,5 @@ export { buildCsv } from './features/export';
 export { GRID_AGGREGATION_FUNCTIONS } from './features/aggregation';
 export { GridDataSourceCacheDefault } from './features/dataSourceCache';
 export type * from './DataGrid.types';
+export { getDefaultPivotDerivedColumns } from './features/pivot';
+export { arSD, deDE, esES, frFR, getGridLocalization, jaJP, ptBR, zhCN } from './locales';

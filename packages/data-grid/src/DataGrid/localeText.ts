@@ -26,6 +26,9 @@ export const DEFAULT_LOCALE_TEXT: GridLocaleText = {
   filterPanelLogicAnd: 'And',
   filterPanelLogicOr: 'Or',
   filterPanelNoFilters: 'No filters applied',
+  filterPanelDeleteFilter: 'Delete filter',
+  filterPanelLogicOperator: 'Logic operator',
+  filterPanelMultiValuePlaceholder: 'a, b, c',
   filterOperators: {
     contains: 'contains',
     doesNotContain: 'does not contain',
@@ -85,4 +88,8 @@ export const DEFAULT_LOCALE_TEXT: GridLocaleText = {
   pivotMoveDown: 'Move down',
   pivotRemove: 'Remove',
   pivotTotal: 'Total',
+  pivotFields: 'Fields (drag to add)',
+  toolbarUndo: 'Undo',
+  toolbarRedo: 'Redo',
+  groupFooterLabel: (groupLabel) => `${groupLabel} total`,
 };

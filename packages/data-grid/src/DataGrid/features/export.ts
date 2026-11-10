@@ -8,6 +8,15 @@ export interface CsvOptions {
   raw?: boolean;
   /** Prepends a byte order mark so Excel reads the file as UTF-8. */
   utf8WithBom?: boolean;
+  /** Prefixes text that a spreadsheet would read as a formula with `'`. */
+  escapeFormulas?: boolean;
+}
+
+const FORMULA_START = /^[=+\-@\t\r]/;
+
+/** Text cells that start like a formula get a leading `'`. Numbers, such as negative ones, are left alone. */
+function escapeFormula<R extends GridValidRowModel>(text: string, row: R, column: GridColDef<R>): string {
+  return column.type !== 'number' && typeof getCellValue(row, column) === 'string' && FORMULA_START.test(text) ? `'${text}` : text;
 }
 
 function exportValue<R extends GridValidRowModel>(row: R, column: GridColDef<R>, raw = false): string {
@@ -30,14 +39,21 @@ function escapeCsv(value: string, delimiter: string): string {
 export function buildCsv<R extends GridValidRowModel>(
   rows: readonly R[],
   columns: readonly GridColDef<R>[],
-  { delimiter = ',', includeHeaders = true, raw = false, utf8WithBom = false }: CsvOptions = {},
+  { delimiter = ',', includeHeaders = true, raw = false, utf8WithBom = false, escapeFormulas = false }: CsvOptions = {},
 ): string {
   const lines: string[] = [];
   if (includeHeaders) {
     lines.push(columns.map((column) => escapeCsv(column.headerName ?? column.field, delimiter)).join(delimiter));
   }
   for (const row of rows) {
-    lines.push(columns.map((column) => escapeCsv(exportValue(row, column, raw), delimiter)).join(delimiter));
+    lines.push(
+      columns
+        .map((column) => {
+          const text = exportValue(row, column, raw);
+          return escapeCsv(escapeFormulas ? escapeFormula(text, row, column) : text, delimiter);
+        })
+        .join(delimiter),
+    );
   }
   return (utf8WithBom ? '﻿' : '') + lines.join('\r\n');
 }

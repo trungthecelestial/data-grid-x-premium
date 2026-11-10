@@ -8,11 +8,14 @@ import type {
   GridDataSourceGetRowsResult,
   GridFilterModel,
   GridPaginationModel,
+  GridPivotColumnNode,
+  GridPivotModel,
   GridRowId,
   GridValidRowModel,
 } from '../DataGrid.types';
 import { GRID_AGGREGATION_FUNCTIONS } from '../features/aggregation';
 import { GridDataSourceCacheDefault } from '../features/dataSourceCache';
+import { buildServerPivotLayout, EMPTY_PIVOT_MODEL, isPivotModelEmpty, type GridServerPivotLayout } from '../features/pivot';
 import { useGridState } from './useGridState';
 
 const PLACEHOLDER_INDEX = '__lazyPlaceholderIndex';
@@ -23,6 +26,19 @@ const NO_MODEL: GridAggregationModel = {};
 const NO_CHILDREN = new Map<GridRowId, never[]>();
 /** Rows requested at a time when lazy loading runs on the "All" page size. */
 const FALLBACK_CHUNK_SIZE = 100;
+
+/** Pivoting done by the server, as the grid above the hook needs it. */
+export interface GridServerPivot {
+  /** The data source pivots and pivoting is not turned off. */
+  available: boolean;
+  enabled: boolean;
+  /** A pivot table shows. */
+  applied: boolean;
+  model: GridPivotModel;
+  setEnabled: (enabled: boolean) => void;
+  setModel: (model: GridPivotModel) => void;
+  layout: GridServerPivotLayout | null;
+}
 
 /** What a server-backed grid needs beyond regular props. */
 export interface GridServerRows<R extends GridValidRowModel> {
@@ -81,17 +97,29 @@ export function useGridDataSource<R extends GridValidRowModel>(
     props.onAggregationModelChange,
   );
 
-  const aggregationModel = useMemo(
+  const userAggregationModel = useMemo(
     () => Object.fromEntries(Object.entries(storedAggregationModel).filter(([, fn]) => functions[fn])),
     [storedAggregationModel, functions],
   );
 
+  const [pivotEnabled, setPivotEnabled] = useGridState(props.pivotActive, initialState?.pivoting?.enabled ?? false, props.onPivotActiveChange);
+  const [pivotModel, setPivotModel] = useGridState(props.pivotModel, initialState?.pivoting?.model ?? EMPTY_PIVOT_MODEL, props.onPivotModelChange);
+  const pivotAvailable = Boolean(dataSource.supportsPivoting) && !props.disablePivoting;
+  const pivotApplied = pivotAvailable && pivotEnabled && !isPivotModelEmpty(pivotModel);
+  const [pivotColumnTree, setPivotColumnTree] = useState<GridPivotColumnNode[] | undefined>(undefined);
+  const pivotRowFields = useMemo(() => pivotModel.rows.map(({ field }) => field), [pivotModel.rows]);
+  // While pivoting the server groups by the pivot row fields, and aggregates through the pivot model instead.
+  const effectiveGroupingModel = pivotApplied ? pivotRowFields : rowGroupingModel;
+  const aggregationModel = pivotApplied ? NO_MODEL : userAggregationModel;
+  const effectiveTreeData = treeData && !pivotApplied;
+
   // Without these two callbacks the server cannot describe a hierarchy, and grouping stays on the loaded rows.
   const canNest = Boolean(dataSource.getGroupKey && dataSource.getChildrenCount);
-  const nestsByColumns = canNest && !treeData && rowGroupingModel.length > 0;
-  const nests = canNest && (treeData || rowGroupingModel.length > 0);
-  const isLazy = lazyLoading && !nests;
-  const groupFields = nestsByColumns ? rowGroupingModel : NO_FIELDS;
+  const nestsByColumns = canNest && !effectiveTreeData && effectiveGroupingModel.length > 0;
+  const nests = canNest && (effectiveTreeData || effectiveGroupingModel.length > 0);
+  const isLazy = lazyLoading && !nests && !pivotApplied;
+  const groupFields = nestsByColumns ? effectiveGroupingModel : NO_FIELDS;
+  const sentPivotModel = pivotApplied ? pivotModel : undefined;
 
   const [root, setRoot] = useState<{ rows: readonly R[]; rowCount: number; aggregateRow?: R }>({ rows: [], rowCount: 0 });
   const [childrenByParent, setChildrenByParent] = useState<ReadonlyMap<GridRowId, readonly R[]>>(NO_CHILDREN);
@@ -100,14 +128,14 @@ export function useGridDataSource<R extends GridValidRowModel>(
   const [refetchTick, setRefetchTick] = useState(0);
 
   const cache = useMemo(() => (dataSourceCache === undefined ? new GridDataSourceCacheDefault() : dataSourceCache), [dataSourceCache]);
-  const queryKey = JSON.stringify([sortModel, filterModel, groupFields, aggregationModel, nests, refetchTick]);
+  const queryKey = JSON.stringify([sortModel, filterModel, groupFields, aggregationModel, nests, sentPivotModel ?? null, refetchTick]);
   const chunkSize = paginationModel.pageSize > 0 ? paginationModel.pageSize : FALLBACK_CHUNK_SIZE;
 
-  const latest = useRef({ dataSource, sortModel, filterModel, groupFields, aggregationModel, paginationModel, queryKey, chunkSize });
-  latest.current = { dataSource, sortModel, filterModel, groupFields, aggregationModel, paginationModel, queryKey, chunkSize };
+  const latest = useRef({ dataSource, sortModel, filterModel, groupFields, aggregationModel, paginationModel, queryKey, chunkSize, sentPivotModel });
+  latest.current = { dataSource, sortModel, filterModel, groupFields, aggregationModel, paginationModel, queryKey, chunkSize, sentPivotModel };
 
   const makeParams = useCallback((pagination: GridPaginationModel, groupKeys: string[]): GridDataSourceGetRowsParams => {
-    const { sortModel: sort, filterModel: filter, groupFields: fields, aggregationModel: aggregation } = latest.current;
+    const { sortModel: sort, filterModel: filter, groupFields: fields, aggregationModel: aggregation, sentPivotModel: pivot } = latest.current;
     const start = pagination.pageSize > 0 ? pagination.page * pagination.pageSize : 0;
     return {
       sortModel: sort,
@@ -118,6 +146,7 @@ export function useGridDataSource<R extends GridValidRowModel>(
       groupKeys,
       groupFields: [...fields],
       aggregationModel: aggregation,
+      ...(pivot && { pivotModel: pivot }),
     };
   }, []);
 
@@ -152,6 +181,7 @@ export function useGridDataSource<R extends GridValidRowModel>(
       (response) => {
         if (current === requestRef.current) {
           setRoot({ rows: response.rows, rowCount: getRowCount(response, params.start, pagination.pageSize), aggregateRow: response.aggregateRow });
+          setPivotColumnTree(response.pivotColumns);
           setLoading(false);
         }
       },
@@ -252,7 +282,7 @@ export function useGridDataSource<R extends GridValidRowModel>(
         for (const row of level) {
           const id = userGetRowId(row);
           const isColumnGroup = nestsByColumns && depth < groupFields.length;
-          const path = [...parentPath, isColumnGroup || treeData ? String(dataSource.getGroupKey?.(row)) : String(id)];
+          const path = [...parentPath, isColumnGroup || effectiveTreeData ? String(dataSource.getGroupKey?.(row)) : String(id)];
           paths.set(id, path);
           if (isColumnGroup) {
             groups.add(id);
@@ -265,7 +295,7 @@ export function useGridDataSource<R extends GridValidRowModel>(
     }
     return { flatRows: rows, pathById: paths, groupIds: groups };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nests, nestsByColumns, treeData, groupFields, root.rows, childrenByParent, userGetRowId]);
+  }, [nests, nestsByColumns, effectiveTreeData, groupFields, root.rows, childrenByParent, userGetRowId]);
 
   const pathRef = useRef(pathById);
   pathRef.current = pathById;
@@ -329,14 +359,35 @@ export function useGridDataSource<R extends GridValidRowModel>(
     [nestsByColumns, props.columns, isGroupRow],
   );
 
-  const { getAggregatedValue } = dataSource;
+  const pivotColumnsSource = props.columns;
+  const getPivotColumnField = dataSource.getPivotColumnField;
+  const { pivotingColDef } = props;
+  const pivotLayout = useMemo(
+    () =>
+      pivotApplied
+        ? buildServerPivotLayout({
+            model: pivotModel,
+            columns: new Map(pivotColumnsSource.map((column) => [column.field, column])),
+            pivotColumns: pivotColumnTree,
+            functions,
+            getField: getPivotColumnField,
+            pivotingColDef: pivotingColDef as Parameters<typeof buildServerPivotLayout>[0]['pivotingColDef'],
+          })
+        : null,
+    [pivotApplied, pivotModel, pivotColumnsSource, pivotColumnTree, functions, getPivotColumnField, pivotingColDef],
+  );
+
+  // Pivot rows hold their values in the generated fields, so reading those is the default way to their aggregates.
+  const getAggregatedValue =
+    dataSource.getAggregatedValue ?? (pivotApplied ? (row: R, field: string) => (row as GridValidRowModel)[field] : undefined);
+  const shownAggregationModel = pivotLayout?.aggregationModel ?? aggregationModel;
   const footerAggregates = useMemo(() => {
     if (!getAggregatedValue || !root.aggregateRow) {
       return null;
     }
     const aggregateRow = root.aggregateRow;
-    return Object.fromEntries(Object.keys(aggregationModel).map((field) => [field, getAggregatedValue(aggregateRow, field)]));
-  }, [getAggregatedValue, root.aggregateRow, aggregationModel]);
+    return Object.fromEntries(Object.keys(shownAggregationModel).map((field) => [field, getAggregatedValue(aggregateRow, field)]));
+  }, [getAggregatedValue, root.aggregateRow, shownAggregationModel]);
 
   const userProcessRowUpdate = props.processRowUpdate;
   const processRowUpdate = dataSource.updateRow
@@ -366,9 +417,20 @@ export function useGridDataSource<R extends GridValidRowModel>(
     onRenderedRangeChange: isLazy ? onRenderedRangeChange : undefined,
   };
 
+  const serverPivot: GridServerPivot = {
+    available: pivotAvailable,
+    enabled: pivotEnabled,
+    applied: pivotApplied,
+    model: pivotModel,
+    setEnabled: setPivotEnabled,
+    setModel: setPivotModel,
+    layout: pivotLayout,
+  };
+
   return {
     rows: nests ? flatRows : isLazy ? lazyRows : root.rows,
-    columns,
+    columns: pivotLayout ? (pivotLayout.columns as unknown as GridColDef<R>[]) : columns,
+    serverPivot,
     rowCount: isLazy ? (lazy.rowCount ?? -1) : root.rowCount,
     loading: props.loading || loading,
     sortModel,
@@ -377,9 +439,9 @@ export function useGridDataSource<R extends GridValidRowModel>(
     onFilterModelChange: setFilterModel,
     paginationModel,
     onPaginationModelChange: setPaginationModel,
-    rowGroupingModel: rowGroupingModel as string[],
+    rowGroupingModel: effectiveGroupingModel as string[],
     onRowGroupingModelChange: setRowGroupingModel as (model: string[]) => void,
-    aggregationModel,
+    aggregationModel: shownAggregationModel,
     onAggregationModelChange: setAggregationModel,
     sortingMode: 'server',
     filterMode: 'server',
@@ -388,7 +450,7 @@ export function useGridDataSource<R extends GridValidRowModel>(
     processRowUpdate,
     serverRows,
     ...(isLazy && { pagination: false, getRowId }),
-    ...(nests && { treeData: true, getTreeDataPath, getChildrenCount, onFetchChildren }),
+    ...(nests ? { treeData: true, getTreeDataPath, getChildrenCount, onFetchChildren } : pivotApplied ? { treeData: false } : {}),
     ...(nestsByColumns && {
       isRowSelectable: (params: { id: GridRowId; row: R }) => !groupIdsRef.current.has(params.id) && (userIsRowSelectable?.(params) ?? true),
       isCellEditable: (params: Parameters<NonNullable<DataGridProps<R>['isCellEditable']>>[0]) =>

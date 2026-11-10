@@ -41,7 +41,7 @@ Set `pivotModel` and `pivotActive`, seed them through `initialState.pivoting`, o
 />
 ```
 
-Filters run on the source rows before pivoting, and sorting runs on the generated rows. Every subtotal and total is calculated from the source rows. Pivoting needs client-side rows, so it is unavailable with `dataSource` or a server mode.
+Filters run on the source rows before pivoting, and sorting runs on the generated rows. Every subtotal and total is calculated from the source rows. Client-side pivoting is unavailable with a server mode. With `dataSource`, the server can pivot instead (see below).
 
 ## Custom aggregation functions
 
@@ -78,7 +78,68 @@ Pass `dataSource` and sorting, filtering and pagination run on your server. The 
 
 Responses are cached for five minutes. Pass your own `dataSourceCache`, or `null` to turn it off. `apiRef.current.refetch()` empties the cache and loads again.
 
-Only the top level is paginated, so a response for `groupKeys` with entries should hold all children of that parent. Pivoting stays client-side.
+Only the top level is paginated, so a response for `groupKeys` with entries should hold all children of that parent.
+
+### Server-side pivoting
+
+Set `supportsPivoting` on the data source to show the Pivot button. While a pivot table shows, `getRows` receives `pivotModel`, and `groupFields` holds its row fields, so the server returns one group row per value with `getGroupKey` and `getChildrenCount` as for row grouping. Each row holds the value of every column path in the field `getPivotColumnField` names, by default the path and the value field joined with `>->` (`2024>->North>->salary`). Return the values of the column fields as a tree in `pivotColumns`, and the grand totals in `aggregateRow`.
+
+## Undo and redo
+
+Cell edits, row edits and pastes go on a history stack. Ctrl/Cmd+Z undoes, Ctrl/Cmd+Shift+Z or Ctrl+Y redoes, and the toolbar shows both buttons. Undoing calls `processRowUpdate` with the earlier row, so the change reaches your server too. Set `historyStackSize` to change how many steps are kept (30 by default, `0` turns it off), and use `apiRef.current.history` (`undo`, `redo`, `canUndo`, `canRedo`, `clear`) from your own controls. A step whose rows changed since, for example after new `rows` arrive, empties the history instead of overwriting them.
+
+## Grouping and aggregation options
+
+| Prop | Does |
+| --- | --- |
+| `rowGroupingColumnMode="multiple"` | One grouping column per grouped field |
+| `groupingColDef` | Also takes `hideDescendantCount`, `leafField`, or a function of `{ groupingField }` |
+| `isGroupExpandedByDefault` | Picks the groups that start expanded |
+| `getAggregationPosition` | `'inline'`, `'footer'` or `null` per group; depth -1 is the grand total |
+| `aggregationRowsScope="all"` | Aggregates the rows the filters hide too |
+| `disableChildrenFiltering`, `disableChildrenSorting` | Tree data filters or sorts the top level only |
+| `groupingValueGetter` (column) | Groups by another value than the cell's, such as the year of a date |
+
+A group, and a tree data parent, aggregates the leaf rows below it. A parent's own values are left out of its total.
+
+With `rowReordering`, tree data and grouped rows can be dragged, or moved with Alt+Arrow, among the rows of their own parent. Children move along with their parent. Dragging a grouped row onto a row or a group of another group moves it there: the grid copies the group's values into the row, or calls the column's `groupingValueSetter` when it has a `groupingValueGetter`. Tree rows move to another parent when you pass `setTreeDataPath`. Either way the changed rows go through `processRowUpdate` and can be undone.
+
+From the keyboard, on a row's drag handle: Alt+Up/Down at the start or end of a group moves a grouped row into the group above or below. Alt+Shift+Right makes a tree row the last child of the row above it, and Alt+Shift+Left moves it out of its parent, right after the parent.
+
+## Pivoting extras
+
+The pivot panel lists the unused fields at the top. Drag them into rows, columns or values, between those areas, or back to the list to remove them. The buttons still work from the keyboard. Date columns offer a year and a quarter field. Pass `getPivotDerivedColumns` to offer others, and `pivotingColDef` to change the generated value columns.
+
+## Excel export
+
+`excelOptions.columnsStyles` styles the cells of a column with a subset of the exceljs style (`numFmt`, `font`, `fill`, `alignment`), so styles written for MUI X carry over. With row grouping or tree data the export writes each group as a bold row with its aggregates and nests its rows in Excel outline levels. Pass `includeRowGroups: false` for flat rows.
+
+## Other options
+
+| Prop | Does |
+| --- | --- |
+| `listView`, `listViewColumn` | Shows each row as one full-width cell, without headers |
+| `autoPageSize` | Fits the page size to the grid's height |
+| `multipleColumnsSortingMode="always"` | Every header click adds to the sort |
+| `filterDebounceMs`, `ignoreDiacritics`, `disableMultipleColumnsFiltering` | Filtering behaviour |
+| `clipboardCopyCellDelimiter`, `splitClipboardPastedText` | Clipboard format |
+| `isRowReorderable`, `headerFilterHeight` | Per-row reordering, header filter row height |
+| `autosizeOnMount`, `autosizeOptions` | Fits columns to their content on mount, and sets the autosize defaults |
+| `getDetailPanelHeight` returning `'auto'` | Sizes a detail panel to its content |
+
+CSV exports prefix text that starts like a formula (`=`, `+`, `-`, `@`) with `'`. Pass `escapeFormulas: false` in `csvOptions` to turn it off.
+
+## Keyboard
+
+Arrow keys move between cells. Up from the first row moves into the column headers, where Left and Right move between headers, Enter sorts (Shift+Enter adds to the sort), Ctrl/Cmd+Enter or Alt+Down opens the column menu, and Down returns to the rows. The grid keeps one tab stop.
+
+## Locales and right-to-left
+
+Pass one of `frFR`, `deDE`, `esES`, `ptBR`, `jaJP`, `zhCN` or `arSD` to `localeText`, or spread one and override a few texts. To set it once for every grid, put it in the theme: `createTheme(theme, getGridLocalization(frFR))`. Any other prop can default from `theme.components.MuiDataGrid.defaultProps` too, as with MUI X. A grid's own props win, and its `localeText` overrides single texts of the theme's. A theme with `direction: 'rtl'` lays the grid out right to left: pinned columns, indents, resizing, scrolling and arrow keys follow the reading direction.
+
+## More api methods
+
+`apiRef.current` also has `showFilterPanel`, `hideFilterPanel`, `showPreferences`, `showColumnMenu`, `hideColumnMenu`, `toggleColumnMenu`, `upsertFilterItem(s)`, `deleteFilterItem`, `setFilterLogicOperator`, `sortColumn`, `getSortedRowIds`, `getSortedRows`, `getRowIdFromRowIndex`, `setColumnVisibilityModel`, `setEditCellValue`, `getCellMode`, `getRowMode`, `getRowParams`, `getCellParams`, `getColumnHeaderParams`, `getRowNode`, `getRowGroupChildren`, `addRowGroupingCriteria`, `removeRowGroupingCriteria`, `setRowGroupingCriteriaIndex`, `setColumnHeaderFocus`, `setRows`, `updateColumns`, `selectRowRange`, `selectCellRange`, `setExpandedDetailPanels`, `setAllRowChildrenExpansion`, `isColumnPinned`, `getColumnPosition`, `getRootDimensions`, `getLocaleText`, `getRowElement`, `getCellElement`, `getColumnHeaderElement`, `getRowValue`, `getRowFormattedValue`, `isRowSelectable`, `publishEvent`, `getAggregationModel`, `getRowGroupingModel` and `getColumnVisibilityModel`.
 
 ## Scripts
 

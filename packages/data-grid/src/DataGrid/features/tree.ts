@@ -116,13 +116,24 @@ export function buildGroupedTree<R extends GridValidRowModel>(
   return roots;
 }
 
-/** Drops nodes that neither pass `keep` nor have a surviving descendant. */
+/**
+ * Drops nodes that neither pass `keep` nor have a surviving descendant.
+ * With `rootsOnly`, only the top level is tested and a kept node keeps all of its children.
+ */
 export function pruneTree<R extends GridValidRowModel>(
   nodes: readonly GridTreeNode<R>[],
   keep: (row: R) => boolean,
+  rootsOnly = false,
 ): GridTreeNode<R>[] {
   const result: GridTreeNode<R>[] = [];
   for (const node of nodes) {
+    if (rootsOnly) {
+      // A generated group has no row of its own, so it stays when any row below it matches.
+      if (node.row ? keep(node.row) : collectRows(node).some(keep)) {
+        result.push(node);
+      }
+      continue;
+    }
     const children = pruneTree(node.children, keep);
     if ((node.row && keep(node.row)) || children.length > 0) {
       const pruned = { ...node, children };
@@ -137,6 +148,7 @@ export function pruneTree<R extends GridValidRowModel>(
 export function sortTree<R extends GridValidRowModel>(
   nodes: readonly GridTreeNode<R>[],
   compare: ((a: R, b: R) => number) | null,
+  rootsOnly = false,
 ): GridTreeNode<R>[] {
   const sorted = [...nodes].sort((a, b) => {
     if (a.row && b.row) {
@@ -144,6 +156,9 @@ export function sortTree<R extends GridValidRowModel>(
     }
     return compare || (!a.row && !b.row) ? a.label.localeCompare(b.label, undefined, { numeric: true }) : 0;
   });
+  if (rootsOnly) {
+    return sorted;
+  }
   return sorted.map((node) => (node.children.length > 0 ? { ...node, children: sortTree(node.children, compare) } : node));
 }
 
@@ -157,6 +172,20 @@ export function flattenTree<R extends GridValidRowModel>(
     if (node.children.length > 0 && isExpanded(node)) {
       flattenTree(node.children, isExpanded, out);
     }
+  }
+  return out;
+}
+
+/** The data rows at the bottom of the subtree: rows without children. A node without children is its own leaf. */
+export function collectLeafRows<R extends GridValidRowModel>(node: GridTreeNode<R>, out: R[] = []): R[] {
+  if (node.children.length === 0) {
+    if (node.row) {
+      out.push(node.row);
+    }
+    return out;
+  }
+  for (const child of node.children) {
+    collectLeafRows(child, out);
   }
   return out;
 }

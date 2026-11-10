@@ -5,7 +5,7 @@ import { getValueOptions } from './columns';
  * Splits tab separated clipboard text into rows and cells.
  * Quoted cells may hold tabs, line breaks and doubled quotes, the way spreadsheets write them.
  */
-export function parseClipboardText(text: string): string[][] {
+export function parseClipboardText(text: string, delimiter = '\t'): string[][] {
   const rows: string[][] = [];
   let row: string[] = [];
   let cell = '';
@@ -28,7 +28,8 @@ export function parseClipboardText(text: string): string[][] {
     if (char === '"' && cellStart) {
       quoted = true;
       cellStart = false;
-    } else if (char === '\t') {
+    } else if (text.startsWith(delimiter, index)) {
+      index += delimiter.length - 1;
       row.push(cell);
       cell = '';
       cellStart = true;

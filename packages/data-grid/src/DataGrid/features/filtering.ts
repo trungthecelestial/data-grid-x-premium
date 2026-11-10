@@ -184,15 +184,36 @@ function isBlankFilterValue(value: unknown): boolean {
 
 type RowPredicate<R> = (row: R) => boolean;
 
+export interface GridFilterOptions {
+  /** Compares text without its accents. */
+  ignoreDiacritics?: boolean;
+}
+
+/** Strips accents, so `Café` becomes `Cafe`. Other values pass through. */
+export function removeDiacritics<V>(value: V): V {
+  if (typeof value === 'string') {
+    return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '') as V;
+  }
+  if (Array.isArray(value)) {
+    return value.map(removeDiacritics) as V;
+  }
+  return value;
+}
+
 function buildItemPredicate<R extends GridValidRowModel>(
   item: GridFilterItem,
   columns: ReadonlyMap<string, GridColDef<R>>,
+  options: GridFilterOptions,
 ): RowPredicate<R> | null {
   const column = columns.get(item.field);
   if (!column || !isFilterable(column)) {
     return null;
   }
   const operator = getColumnFilterOperators(column).find((candidate) => candidate.value === item.operator);
+  if (options.ignoreDiacritics) {
+    const test = operator?.getApplyFilterFn({ ...item, value: removeDiacritics(item.value) }, column);
+    return test ? (row) => test(removeDiacritics(getCellValue(row, column)), row) : null;
+  }
   const test = operator?.getApplyFilterFn(item, column);
   return test ? (row) => test(getCellValue(row, column), row) : null;
 }
@@ -202,11 +223,13 @@ export function getFilterPredicate<R extends GridValidRowModel>(
   model: GridFilterModel,
   columns: ReadonlyMap<string, GridColDef<R>>,
   quickFilterColumns: readonly GridColDef<R>[],
+  options: GridFilterOptions = {},
 ): RowPredicate<R> | null {
   const predicates: RowPredicate<R>[] = [];
+  const normalize = options.ignoreDiacritics ? (text: string) => removeDiacritics(text) : (text: string) => text;
 
   const itemPredicates = model.items.flatMap((item) => {
-    const predicate = buildItemPredicate(item, columns);
+    const predicate = buildItemPredicate(item, columns, options);
     return predicate ? [predicate] : [];
   });
   if (itemPredicates.length > 0) {
@@ -217,7 +240,7 @@ export function getFilterPredicate<R extends GridValidRowModel>(
     );
   }
 
-  const quickValues = (model.quickFilterValues ?? []).map((value) => value.trim().toLowerCase()).filter(Boolean);
+  const quickValues = (model.quickFilterValues ?? []).map((value) => normalize(value.trim().toLowerCase())).filter(Boolean);
   const searchable = quickFilterColumns.filter(isFilterable);
   if (quickValues.length > 0 && searchable.length > 0) {
     const matches = (row: R, value: string) =>
@@ -227,8 +250,8 @@ export function getFilterPredicate<R extends GridValidRowModel>(
           return test ? test(getCellValue(row, column), row) : false;
         }
         return (
-          getFormattedValue(row, column).toLowerCase().includes(value) ||
-          toText(getCellValue(row, column)).includes(value)
+          normalize(getFormattedValue(row, column).toLowerCase()).includes(value) ||
+          normalize(toText(getCellValue(row, column))).includes(value)
         );
       });
     predicates.push(

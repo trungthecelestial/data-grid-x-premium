@@ -23,6 +23,8 @@ export interface GridFilterPanelProps<R extends GridValidRowModel> {
   filterModel: GridFilterModel;
   onFilterModelChange: (model: GridFilterModel) => void;
   localeText: GridLocaleText;
+  /** Hides "Add filter" once there is a filter. */
+  disableMultipleFilters?: boolean;
 }
 
 export interface ValueInputProps<R extends GridValidRowModel> {
@@ -86,7 +88,7 @@ export function FilterValueInput<R extends GridValidRowModel>(props: ValueInputP
         variant={variant}
         hiddenLabel={filled}
         sx={fieldSx}
-        placeholder="a, b, c"
+        placeholder={localeText.filterPanelMultiValuePlaceholder}
         value={Array.isArray(item.value) ? item.value.join(', ') : ''}
         onChange={(event) =>
           onChange(
@@ -145,7 +147,7 @@ export function FilterValueInput<R extends GridValidRowModel>(props: ValueInputP
 }
 
 export function GridFilterPanel<R extends GridValidRowModel>(props: GridFilterPanelProps<R>) {
-  const { columns, filterModel, onFilterModelChange, localeText } = props;
+  const { columns, filterModel, onFilterModelChange, localeText, disableMultipleFilters = false } = props;
   const nextId = useRef(0);
 
   const filterable = columns.filter(isFilterable);
@@ -188,7 +190,7 @@ export function GridFilterPanel<R extends GridValidRowModel>(props: GridFilterPa
           <Box key={item.id ?? index} sx={{ display: 'flex', alignItems: 'flex-end', gap: 1.5 }}>
             <IconButton
               size="small"
-              aria-label="Delete filter"
+              aria-label={localeText.filterPanelDeleteFilter}
               onClick={() => updateItems(filterModel.items.filter((_, itemIndex) => itemIndex !== index))}
             >
               <CloseIcon fontSize="small" />
@@ -204,7 +206,7 @@ export function GridFilterPanel<R extends GridValidRowModel>(props: GridFilterPa
                 onChange={(event) =>
                   onFilterModelChange({ ...filterModel, logicOperator: event.target.value as 'and' | 'or' })
                 }
-                inputProps={{ 'aria-label': 'Logic operator' }}
+                inputProps={{ 'aria-label': localeText.filterPanelLogicOperator }}
               >
                 <MenuItem value="and">{localeText.filterPanelLogicAnd}</MenuItem>
                 <MenuItem value="or">{localeText.filterPanelLogicOr}</MenuItem>
@@ -264,9 +266,13 @@ export function GridFilterPanel<R extends GridValidRowModel>(props: GridFilterPa
         );
       })}
       <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
-        <Button size="small" startIcon={<AddIcon />} onClick={addItem}>
-          {localeText.filterPanelAddFilter}
-        </Button>
+        {disableMultipleFilters && filterModel.items.length > 0 ? (
+          <Box />
+        ) : (
+          <Button size="small" startIcon={<AddIcon />} onClick={addItem}>
+            {localeText.filterPanelAddFilter}
+          </Button>
+        )}
         {filterModel.items.length > 0 && (
           <Button size="small" onClick={() => updateItems([])}>
             {localeText.filterPanelRemoveAll}

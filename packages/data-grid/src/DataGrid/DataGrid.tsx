@@ -21,7 +21,7 @@ import TableHead from '@mui/material/TableHead';
 import TablePagination from '@mui/material/TablePagination';
 import TableRow from '@mui/material/TableRow';
 import TableSortLabel from '@mui/material/TableSortLabel';
-import { alpha, darken, lighten, type Theme } from '@mui/material/styles';
+import { alpha, darken, lighten, useTheme, type Theme } from '@mui/material/styles';
 import {
   useCallback,
   useEffect,
@@ -54,6 +54,7 @@ import type {
   GridApiRef,
   GridAutosizeOptions,
   GridCellParams,
+  GridColumnHeaderParams,
   GridCellSelectionModel,
   GridColDef,
   GridColumnsPanelSlotProps,
@@ -62,7 +63,9 @@ import type {
   GridExcelExportOptions,
   GridEventMap,
   GridEventName,
+  GridFilterItem,
   GridFilterModel,
+  GridGroupingColDefOverride,
   GridFilterPanelSlotProps,
   GridPivotModel,
   GridPivotPanelSlotProps,
@@ -84,12 +87,22 @@ import type {
   GridValidRowModel,
 } from './DataGrid.types';
 import {
+  computeAggregates,
   formatAggregate,
   getAggregationLabel,
   getAvailableAggregationFunctions,
   GRID_AGGREGATION_FUNCTIONS,
 } from './features/aggregation';
-import { computePivot, EMPTY_PIVOT_MODEL, isPivotModelEmpty, PIVOT_ROW_ID, PIVOT_ROW_PATH, type GridPivotResult } from './features/pivot';
+import {
+  computePivot,
+  getDefaultPivotDerivedColumns,
+  withPivotDerivedColumns,
+  EMPTY_PIVOT_MODEL,
+  isPivotModelEmpty,
+  PIVOT_ROW_ID,
+  PIVOT_ROW_PATH,
+  type GridPivotResult,
+} from './features/pivot';
 import { computeAutosizeWidths } from './features/autosize';
 import {
   buildGroupHeaderRows,
@@ -103,10 +116,10 @@ import {
 } from './features/columns';
 import { parseClipboardText, parsePastedValue, SKIP_PASTE } from './features/clipboard';
 import { buildCsv, buildPrintHtml, downloadFile, printHtml } from './features/export';
-import { buildXlsx, XLSX_MIME_TYPE } from './features/xlsx';
+import { buildXlsx, XLSX_MIME_TYPE, type XlsxEntry } from './features/xlsx';
 import { countActiveFilters, getColumnFilterOperators, getFilterPredicate, getInitialFilterValue, isFilterable } from './features/filtering';
-import { applySortClick, DEFAULT_SORTING_ORDER } from './features/sorting';
-import { collectRows, type GridTreeNode } from './features/tree';
+import { applySortClick, DEFAULT_SORTING_ORDER, getRowComparator } from './features/sorting';
+import { collectLeafRows, collectRows, flattenTree, type GridTreeNode } from './features/tree';
 import { useElementSize } from './hooks/useElementSize';
 import { useGridRows } from './hooks/useGridRows';
 import { useGridDataSource, type GridServerRows } from './hooks/useGridDataSource';
@@ -127,7 +140,43 @@ const DETAIL_FIELD = '__detail_panel_toggle__';
 const TREE_GROUP_FIELD = '__tree_data_group__';
 const ROW_GROUP_FIELD = '__row_group_by_columns_group__';
 const REORDER_FIELD = '__reorder__';
+/** In `'multiple'` grouping column mode each grouped field gets a column named after it. */
+const ROW_GROUP_FIELD_PREFIX = '__row_group_by_columns_group_field_';
 const SPECIAL_FIELDS = new Set([REORDER_FIELD, CHECKBOX_FIELD, DETAIL_FIELD, TREE_GROUP_FIELD, ROW_GROUP_FIELD]);
+const isRowGroupField = (field: string) => field === ROW_GROUP_FIELD || field.startsWith(ROW_GROUP_FIELD_PREFIX);
+const isSpecialField = (field: string) => SPECIAL_FIELDS.has(field) || field.startsWith(ROW_GROUP_FIELD_PREFIX);
+const LIST_VIEW_FIELD = '__list_view__';
+/** The first column of a grouped Excel export, which holds the group labels. */
+const EXPORT_GROUP_FIELD = '__export_group__';
+/** Key of a detail panel in the measured heights, which share their map with rows. */
+const detailKey = (id: GridRowId) => `\u0000detail\u0000${String(id)}`;
+const DEFAULT_HISTORY_STACK_SIZE = 30;
+
+/** True when both rows hold the same values, so a history step still matches what the grid shows. */
+const sameRow = (a: GridValidRowModel, b: GridValidRowModel) => {
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  for (const key of keys) {
+    const left = a[key];
+    const right = b[key];
+    if (left !== right && !(left instanceof Date && right instanceof Date && left.getTime() === right.getTime())) {
+      return false;
+    }
+  }
+  return true;
+};
+
+/** Lags a value by `delay` milliseconds. A delay of 0 passes it straight through. */
+function useDebouncedValue<V>(value: V, delay: number): V {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    if (delay <= 0) {
+      return undefined;
+    }
+    const timer = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(timer);
+  }, [value, delay]);
+  return delay <= 0 ? value : debounced;
+}
 
 const DENSITY_HEIGHTS = {
   compact: { row: 36, header: 40 },
@@ -166,7 +215,14 @@ const menuButtonShownSx = { width: 24, p: 0.25, opacity: 1, mx: 0.25 } as const;
 
 type Entry<R extends GridValidRowModel> =
   | { kind: 'row'; node: GridTreeNode<R> }
-  | { kind: 'detail'; node: GridTreeNode<R>; height: number };
+  /** `auto` panels are measured, and `height` is the last measured height. */
+  | { kind: 'detail'; node: GridTreeNode<R>; height: number; auto?: boolean }
+  /** The aggregates of an expanded group whose position is `'footer'`, under its last descendant. */
+  | { kind: 'groupFooter'; node: GridTreeNode<R>; height: number };
+
+interface HistoryEntry<R extends GridValidRowModel> {
+  changes: { id: GridRowId; before: R; after: R }[];
+}
 
 /** Row changes made at runtime (cell edits and `apiRef.updateRows`). They apply on top of `rows` until `rows` changes. */
 interface RowUpdates<R extends GridValidRowModel> {
@@ -227,6 +283,8 @@ interface GridPivoting<R extends GridValidRowModel> {
   setEnabled: (enabled: boolean) => void;
   setModel: (model: GridPivotModel) => void;
   sourceColumns: readonly GridColDef<R>[];
+  /** The source columns and their derived fields, offered by the pivot panel. */
+  pivotColumns: readonly GridColDef<R>[];
   totals: Record<string, unknown> | null;
   rowLabelColumn: GridColDef<R> | null;
   /** Receives the rows with runtime edits applied, so pivoting starts from what the user sees. */
@@ -238,7 +296,7 @@ type DataGridBaseProps<R extends GridValidRowModel> = DataGridProps<R> & { onRef
 function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: DataGridBaseProps<R>) {
   const {
     rows,
-    columns: userColumns,
+    columns: columnsProp,
     getRowId = defaultGetRowId as (row: R) => GridRowId,
     apiRef,
     initialState,
@@ -320,9 +378,36 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     scrollEndThreshold = 80,
     csvOptions,
     printOptions,
+    multipleColumnsSortingMode = 'withModifierKey',
+    filterDebounceMs = 0,
+    ignoreDiacritics = false,
+    disableMultipleColumnsFiltering = false,
+    autoPageSize = false,
+    headerFilterHeight,
+    isRowReorderable,
+    splitClipboardPastedText,
+    clipboardCopyCellDelimiter = '\t',
+    historyStackSize = DEFAULT_HISTORY_STACK_SIZE,
+    isGroupExpandedByDefault,
+    rowGroupingColumnMode = 'single',
+    disableChildrenFiltering = false,
+    disableChildrenSorting = false,
+    aggregationRowsScope = 'filtered',
+    getAggregationPosition,
+    listView = false,
+    listViewColumn,
+    autosizeOnMount = false,
+    autosizeOptions,
   } = props;
 
   const localeText = useMemo(() => ({ ...DEFAULT_LOCALE_TEXT, ...props.localeText }), [props.localeText]);
+
+  // `apiRef.updateColumns` and `apiRef.setRows` change what the props gave, until the props themselves change.
+  const [columnUpdates, setColumnUpdates] = useState<{ source: readonly GridColDef<R>[]; columns: readonly GridColDef<R>[] } | null>(null);
+  const userColumns = columnUpdates?.source === columnsProp ? columnUpdates.columns : columnsProp;
+  const [replacedRows, setReplacedRows] = useState<{ source: readonly R[]; rows: readonly R[] } | null>(null);
+  /** The rows edits apply to: `rows`, or what `apiRef.setRows` put in their place. */
+  const baseRows = replacedRows?.source === rows ? replacedRows.rows : rows;
 
   const [sortModel, setSortModel] = useGridState(
     props.sortModel,
@@ -402,6 +487,12 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
   const [editing, setEditing] = useState<EditState | null>(null);
   const validationTokensRef = useRef<Record<string, number>>({});
   const [focusPosition, setFocusPosition] = useState<{ row: number; col: number } | null>(null);
+  /** The column header that holds the grid's tab stop, while the focus is in the header row. */
+  const [headerFocusCol, setHeaderFocusCol] = useState<number | null>(null);
+  const shouldFocusHeaderRef = useRef(false);
+  const isRtl = useTheme().direction === 'rtl';
+  // An arrow pointing at the content flips with the reading direction.
+  const collapsedIconSx = useMemo(() => (isRtl ? { transform: 'scaleX(-1)' } : undefined), [isRtl]);
   const [scrollTop, setScrollTop] = useState(0);
   const [scrollLeft, setScrollLeft] = useState(0);
 
@@ -413,6 +504,9 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
   const lastSelectedRef = useRef<GridRowId | null>(null);
   const dragFieldRef = useRef<string | null>(null);
   const dragRowRef = useRef<GridRowId | null>(null);
+  // The reorder handle lives in a memoized column, so it calls the latest move through this ref.
+  const moveRowByRef = useRef<(id: GridRowId, step: number) => void>(() => undefined);
+  const moveRowAcrossRef = useRef<(id: GridRowId, key: 'up' | 'down' | 'indent' | 'outdent') => void>(() => undefined);
   const cellAnchorRef = useRef<{ row: number; col: number } | null>(null);
   const draggingCellsRef = useRef(false);
   const pendingFocusRowRef = useRef<GridRowId | null>(null);
@@ -444,13 +538,14 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
   const heights = DENSITY_HEIGHTS[density];
   const rowHeight = props.rowHeight ?? heights.row;
   const headerHeight = props.columnHeaderHeight ?? heights.header;
+  const filterRowHeight = headerFilterHeight ?? headerHeight;
 
   const mergedRows = useMemo(() => {
-    let result: readonly R[] = rows;
+    let result: readonly R[] = baseRows;
     if (rowUpdates.source === rows) {
       const { map, added, deleted } = rowUpdates;
       if (map.size > 0 || added.length > 0 || deleted.size > 0) {
-        const all = added.length > 0 ? [...rows, ...added] : rows;
+        const all = added.length > 0 ? [...baseRows, ...added] : baseRows;
         result = all.flatMap((row) => {
           const id = getRowId(row);
           return deleted.has(id) ? [] : [map.get(id) ?? row];
@@ -463,7 +558,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
       result = [...result].sort((a, b) => (position.get(getRowId(a)) ?? Infinity) - (position.get(getRowId(b)) ?? Infinity) || 0);
     }
     return result;
-  }, [rows, rowUpdates, rowOrder, getRowId]);
+  }, [rows, baseRows, rowUpdates, rowOrder, getRowId]);
 
   const isPivoted = pivoting?.applied ?? false;
   const serverAggregated = Boolean(serverRows?.getAggregatedValue);
@@ -473,12 +568,13 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
 
   const rowsById = useMemo(() => new Map(mergedRows.map((row) => [getRowId(row), row])), [mergedRows, getRowId]);
 
+  // Grouped rows and tree data move among the rows of their own parent. Server-side groups load per parent, so they stay put.
   const canReorder =
     rowReordering &&
     sortModel.length === 0 &&
     countActiveFilters(filterModel) === 0 &&
-    !treeData &&
-    rowGroupingModel.length === 0 &&
+    !serverRows?.groupsByColumns &&
+    !(treeData && serverRows) &&
     paginationMode === 'client';
 
   const moveRow = useCallback(
@@ -533,20 +629,28 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     [orderedFields, userColumnMap, effectiveVisibility],
   );
 
-  const { pageNodes, roots, rootCount, page, filteredRows, nodeAggregates, footerAggregates, isExpanded, isGroup } = useGridRows(
+  const appliedFilterModel = useDebouncedValue(filterModel, filterDebounceMs);
+
+  const { pageNodes, roots, allRoots, rootCount, page, filteredRows, nodeAggregates, aggregationPositions, footerAggregates, isExpanded, isGroup } = useGridRows(
     {
       rows: mergedRows,
       getRowId,
       columnsByField: userColumnMap,
       quickFilterColumns: visibleUserColumns,
       sortModel,
-      filterModel,
+      filterModel: appliedFilterModel,
       sortingMode,
       filterMode,
       treeData,
       getTreeDataPath,
       rowGroupingModel,
       expansion,
+      ignoreDiacritics,
+      disableChildrenFiltering,
+      disableChildrenSorting,
+      aggregationRowsScope,
+      getAggregationPosition,
+      isGroupExpandedByDefault,
       defaultExpansionDepth: defaultGroupingExpansionDepth,
       pagination,
       paginationMode,
@@ -561,6 +665,111 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
   );
 
   const nodeById = useMemo(() => new Map(pageNodes.map((node) => [node.id, node])), [pageNodes]);
+
+  // For reordering grouped rows: the sibling list each node sits in, and its parent.
+  const siblingIndex = useMemo(() => {
+    const index = new Map<GridRowId, { parent: GridRowId | null; siblings: readonly GridTreeNode<R>[]; node: GridTreeNode<R> }>();
+    if (rowReordering && isGroup) {
+      const visit = (nodes: readonly GridTreeNode<R>[], parent: GridRowId | null) => {
+        for (const node of nodes) {
+          index.set(node.id, { parent, siblings: nodes, node });
+          visit(node.children, node.id);
+        }
+      };
+      visit(roots, null);
+    }
+    return index;
+  }, [rowReordering, isGroup, roots]);
+
+  /** Moves a grouped row to the place of `targetId`, which must share its parent. The rows below it move along. */
+  const moveRowAmongSiblings = useCallback(
+    (id: GridRowId, targetId: GridRowId) => {
+      const entry = siblingIndex.get(id);
+      const target = siblingIndex.get(targetId);
+      const row = rowsById.get(id);
+      if (!entry || !target || entry.parent !== target.parent || id === targetId || !row) {
+        return;
+      }
+      const siblings = [...entry.siblings];
+      const oldIndex = siblings.findIndex((node) => node.id === id);
+      const targetIndex = siblings.findIndex((node) => node.id === targetId);
+      const [moved] = siblings.splice(oldIndex, 1);
+      siblings.splice(targetIndex, 0, moved as GridTreeNode<R>);
+      // The new row order is the tree read top to bottom, with this one sibling list replaced.
+      const ids: GridRowId[] = [];
+      const visit = (nodes: readonly GridTreeNode<R>[]) => {
+        for (const node of nodes === entry.siblings ? siblings : nodes) {
+          if (node.row) {
+            ids.push(node.id);
+          }
+          visit(node.children);
+        }
+      };
+      visit(roots);
+      setRowOrder({ source: rows, ids });
+      props.onRowOrderChange?.({ row, oldIndex, targetIndex });
+    },
+    [siblingIndex, rowsById, roots, rows, props.onRowOrderChange],
+  );
+
+  /** Moves a row by `step` places: in `rows` for flat rows, among its siblings for grouped ones. */
+  const moveRowBy = (id: GridRowId, step: number) => {
+    if (isGroup) {
+      const entry = siblingIndex.get(id);
+      const position = entry ? entry.siblings.findIndex((node) => node.id === id) : -1;
+      const target = entry?.siblings[position + step];
+      if (target) {
+        moveRowAmongSiblings(id, target.id);
+      } else {
+        moveRowAcrossRef.current(id, step < 0 ? 'up' : 'down');
+      }
+      return;
+    }
+    moveRow(id, mergedRows.findIndex((row) => getRowId(row) === id) + step);
+  };
+  moveRowByRef.current = moveRowBy;
+  const isTreeReorder = isGroup && treeData && Boolean(getTreeDataPath);
+  /** Whether a dragged row can leave its parent: tree rows need `setTreeDataPath`, grouped rows a way to write each group value. */
+  const canChangeParent = isTreeReorder
+    ? Boolean(props.setTreeDataPath)
+    : isGroup &&
+      rowGroupingModel.every((field) => {
+        const column = userColumnMap.get(field);
+        return column !== undefined && (Boolean(column.groupingValueSetter) || !column.groupingValueGetter);
+      });
+  const isInSubtree = (ancestorId: GridRowId, id: GridRowId) => {
+    for (let current: GridRowId | null | undefined = id; current !== null && current !== undefined; current = siblingIndex.get(current)?.parent) {
+      if (current === ancestorId) {
+        return true;
+      }
+    }
+    return false;
+  };
+  /**
+   * Whether a dragged row may land on another: always for flat rows, among siblings for grouped ones,
+   * and in another group or parent when `canChangeParent`. Grouped rows can be dropped on a group row too, to join that group.
+   */
+  const canDropRowOn = (id: GridRowId, targetId: GridRowId) => {
+    if (!isGroup) {
+      return true;
+    }
+    const entry = siblingIndex.get(id);
+    const target = siblingIndex.get(targetId);
+    if (!entry || !target) {
+      return false;
+    }
+    if (entry.parent === target.parent && (target.node.row || isTreeReorder)) {
+      return true;
+    }
+    if (!canChangeParent || isInSubtree(id, targetId)) {
+      return false;
+    }
+    // A grouped row moves between leaves, or onto a group of the last level, the one rows sit in.
+    return isTreeReorder ? Boolean(target.node.row) : target.node.row ? true : target.node.depth === rowGroupingModel.length - 1;
+  };
+  /** Position used to tell whether a drop lands above or below the target. */
+  const rowOrderPosition = (id: GridRowId) =>
+    isGroup ? (siblingIndex.get(id)?.siblings.findIndex((node) => node.id === id) ?? -1) : mergedRows.findIndex((row) => getRowId(row) === id);
 
   const isAutoHeightRow = useCallback(
     (node: GridTreeNode<R>) => Boolean(node.row && getRowHeight?.({ id: node.id, row: node.row }) === 'auto'),
@@ -719,12 +928,18 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
         disableReorder: true,
         align: 'center',
         renderHeader: () => null,
-        renderCell: ({ id }) => (
+        renderCell: ({ id, row }) => {
+          // Groups the grid generated have no row to move.
+          if (!rowsById.has(id)) {
+            return null;
+          }
+          const movable = canReorder && (!isRowReorderable || isRowReorderable({ id, row }));
+          return (
           <IconButton
             size="small"
             tabIndex={-1}
-            disabled={!canReorder}
-            draggable={canReorder}
+            disabled={!movable}
+            draggable={movable}
             aria-label={localeText.rowReorderHandle}
             onClick={(event) => event.stopPropagation()}
             onDragStart={(event) => {
@@ -742,18 +957,28 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
             }}
             onKeyDown={(event) => {
               const step = event.key === 'ArrowUp' ? -1 : event.key === 'ArrowDown' ? 1 : 0;
-              if (event.altKey && step !== 0 && canReorder) {
+              // Alt+Shift+Right indents a tree row under the row above, Alt+Shift+Left outdents it. Mirrored right to left.
+              const sideways = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0;
+              if (event.altKey && event.shiftKey && sideways !== 0 && movable) {
                 event.preventDefault();
                 event.stopPropagation();
                 pendingFocusRowRef.current = id;
-                moveRow(id, mergedRows.findIndex((row) => getRowId(row) === id) + step);
+                moveRowAcrossRef.current(id, (isRtl ? -sideways : sideways) > 0 ? 'indent' : 'outdent');
+                return;
+              }
+              if (event.altKey && step !== 0 && movable) {
+                event.preventDefault();
+                event.stopPropagation();
+                pendingFocusRowRef.current = id;
+                moveRowByRef.current(id, step);
               }
             }}
-            sx={{ cursor: canReorder ? 'grab' : 'default', '&:active': { cursor: 'grabbing' } }}
+            sx={{ cursor: movable ? 'grab' : 'default', '&:active': { cursor: 'grabbing' } }}
           >
             <DragIndicatorIcon fontSize="small" />
           </IconButton>
-        ),
+          );
+        },
       });
     }
 
@@ -825,7 +1050,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
             {detailIds.includes(id) && getDetailPanelContent({ id, row }) !== undefined ? (
               <KeyboardArrowDownIcon fontSize="small" />
             ) : (
-              <KeyboardArrowRightIcon fontSize="small" />
+              <KeyboardArrowRightIcon fontSize="small" sx={collapsedIconSx} />
             )}
           </IconButton>
         ),
@@ -834,66 +1059,110 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
 
     if (isGroup) {
       const byRowGrouping = rowGroupingModel.length > 0 && (!treeData || Boolean(serverRows?.groupsByColumns));
-      result.push({
-        field: byRowGrouping ? ROW_GROUP_FIELD : TREE_GROUP_FIELD,
-        headerName: byRowGrouping ? localeText.rowGroupingHeader : localeText.treeDataGroupHeader,
+      // Server-side groups come as rows, so they keep the single column.
+      const multiple = byRowGrouping && rowGroupingColumnMode === 'multiple' && !serverRows?.groupsByColumns;
+      const resolveOverride = (groupingField: string | null): GridGroupingColDefOverride<R> =>
+        (typeof groupingColDef === 'function' ? groupingColDef({ groupingField, fields: rowGroupingModel }) : groupingColDef) ?? {};
+
+      /** One grouping cell. `forField` limits it to the groups of one field in `'multiple'` mode. */
+      const renderGroupingCell = (id: GridRowId, override: GridGroupingColDefOverride<R>, forField: string | null, showLeaf: boolean) => {
+        const node = nodeById.get(id);
+        if (!node) {
+          return null;
+        }
+        const leafColumn = override.leafField ? userColumnMap.get(override.leafField) : undefined;
+        if (forField !== null && node.groupField !== forField) {
+          return showLeaf && node.row && !node.groupField && leafColumn ? (
+            <Box component="span" sx={ellipsisSx}>
+              {getFormattedValue(node.row, leafColumn)}
+            </Box>
+          ) : null;
+        }
+        const expandable = node.children.length > 0 || needsChildren(node);
+        const serverGroup = node.row && serverRows?.isGroupRow(node.row);
+        const descendantCount = serverGroup ? (getChildrenCount?.(node.row as R) ?? 0) : node.rowCount;
+        // A server group without children, such as a row of a pivot table, has nothing to count.
+        const count = override.hideDescendantCount || (serverGroup && descendantCount === 0) ? '' : ` (${descendantCount})`;
+        const label = serverGroup
+          ? `${node.label}${count}`
+          : byRowGrouping
+            ? node.groupField
+              ? `${node.label}${count}`
+              : node.row && leafColumn
+                ? getFormattedValue(node.row, leafColumn)
+                : ''
+            : node.label;
+        return (
+          <Box sx={{ display: 'flex', alignItems: 'center', minWidth: 0, paddingInlineStart: `${forField === null ? node.depth * 20 : 0}px` }}>
+            {expandable ? (
+              <IconButton
+                size="small"
+                tabIndex={-1}
+                aria-label={localeText.expandCollapse}
+                aria-expanded={isExpanded(node)}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  toggleExpansion(node);
+                }}
+              >
+                {fetchingIds.has(node.id) ? (
+                  <CircularProgress size={16} aria-label={localeText.loadingLabel} />
+                ) : isExpanded(node) ? (
+                  <KeyboardArrowDownIcon fontSize="small" />
+                ) : (
+                  <KeyboardArrowRightIcon fontSize="small" sx={collapsedIconSx} />
+                )}
+              </IconButton>
+            ) : (
+              <Box sx={{ width: 30, flexShrink: 0 }} />
+            )}
+            <Box component="span" sx={ellipsisSx}>
+              {label}
+            </Box>
+          </Box>
+        );
+      };
+
+      const groupingColumnBase = {
         width: 220,
         sortable: false,
         filterable: false,
         hideable: false,
         disableReorder: true,
-        ...groupingColDef,
-        renderCell: ({ id }) => {
-          const node = nodeById.get(id);
-          if (!node) {
-            return null;
-          }
-          const expandable = node.children.length > 0 || needsChildren(node);
-          const serverGroup = node.row && serverRows?.isGroupRow(node.row);
-          const label = serverGroup
-            ? `${node.label} (${getChildrenCount?.(node.row as R) ?? 0})`
-            : byRowGrouping
-              ? node.groupField
-                ? `${node.label} (${node.rowCount})`
-                : ''
-              : node.label;
-          return (
-            <Box sx={{ display: 'flex', alignItems: 'center', minWidth: 0, pl: `${node.depth * 20}px` }}>
-              {expandable ? (
-                <IconButton
-                  size="small"
-                  tabIndex={-1}
-                  aria-label={localeText.expandCollapse}
-                  aria-expanded={isExpanded(node)}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    toggleExpansion(node);
-                  }}
-                >
-                  {fetchingIds.has(node.id) ? (
-                    <CircularProgress size={16} aria-label={localeText.loadingLabel} />
-                  ) : isExpanded(node) ? (
-                    <KeyboardArrowDownIcon fontSize="small" />
-                  ) : (
-                    <KeyboardArrowRightIcon fontSize="small" />
-                  )}
-                </IconButton>
-              ) : (
-                <Box sx={{ width: 30, flexShrink: 0 }} />
-              )}
-              <Box component="span" sx={ellipsisSx}>
-                {label}
-              </Box>
-            </Box>
-          );
-        },
-      });
+      } as const;
+
+      if (multiple) {
+        rowGroupingModel.forEach((field, index) => {
+          const fullOverride = resolveOverride(field);
+          const { hideDescendantCount: _hide, leafField: _leaf, ...override } = fullOverride;
+          result.push({
+            field: `${ROW_GROUP_FIELD_PREFIX}${field}__`,
+            headerName: userColumnMap.get(field)?.headerName ?? field,
+            ...groupingColumnBase,
+            ...override,
+            renderCell: ({ id }) => renderGroupingCell(id, fullOverride, field, index === 0),
+          });
+        });
+      } else {
+        const fullOverride = resolveOverride(null);
+        const { hideDescendantCount: _hide, leafField: _leaf, ...override } = fullOverride;
+        result.push({
+          field: byRowGrouping ? ROW_GROUP_FIELD : TREE_GROUP_FIELD,
+          headerName: byRowGrouping ? localeText.rowGroupingHeader : localeText.treeDataGroupHeader,
+          ...groupingColumnBase,
+          ...override,
+          renderCell: ({ id }) => renderGroupingCell(id, fullOverride, null, false),
+        });
+      }
     }
 
     return result;
   }, [
     rowReordering,
     canReorder,
+    isRowReorderable,
+    isRtl,
+    rowsById,
     moveRow,
     mergedRows,
     getRowId,
@@ -921,9 +1190,28 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     fetchingIds,
     serverRows,
     getChildrenCount,
+    rowGroupingColumnMode,
+    userColumnMap,
+    collapsedIconSx,
   ]);
 
+  const showListView = listView && listViewColumn !== undefined;
+
   const { columns, leftCount, rightStart } = useMemo(() => {
+    if (showListView && listViewColumn) {
+      // One column as wide as the grid, which renders the whole row.
+      const listColumn: GridColDef<R> = {
+        sortable: false,
+        filterable: false,
+        resizable: false,
+        disableReorder: true,
+        disableColumnMenu: true,
+        ...listViewColumn,
+        field: listViewColumn.field || LIST_VIEW_FIELD,
+        flex: 1,
+      };
+      return { columns: [listColumn], leftCount: 0, rightStart: 1 };
+    }
     const pinnedLeft = (pinned.left ?? []).flatMap((field) => {
       const column = visibleUserColumns.find((candidate) => candidate.field === field);
       return column ? [column] : [];
@@ -940,7 +1228,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
         : column;
     const all = [...specialColumns, ...pinnedLeft.map(withFilterRoom), ...middle.map(withFilterRoom), ...pinnedRight.map(withFilterRoom)];
     return { columns: all, leftCount: specialColumns.length + pinnedLeft.length, rightStart: all.length - pinnedRight.length };
-  }, [specialColumns, visibleUserColumns, pinned, headerFilters, disableColumnFilter]);
+  }, [specialColumns, visibleUserColumns, pinned, headerFilters, disableColumnFilter, showListView, listViewColumn]);
 
   const widths = useMemo(
     () => resolveColumnWidths(columns, containerWidth, widthOverrides),
@@ -1043,23 +1331,49 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
   );
   slotHeightRef.current = (id) => {
     const node = nodeById.get(id);
-    return node ? rowHeightFor(node) : undefined;
+    if (node) {
+      return rowHeightFor(node);
+    }
+    const detail = detailEntriesRef.current.get(id);
+    return detail?.height;
   };
 
   const entries = useMemo(() => {
     const result: Entry<R>[] = [];
+    // Expanded groups with a footer, innermost last. A footer goes in once the rows below its group end.
+    const openFooters: GridTreeNode<R>[] = [];
+    const closeFooters = (depth: number) => {
+      while (openFooters.length > 0 && (openFooters[openFooters.length - 1] as GridTreeNode<R>).depth >= depth) {
+        result.push({ kind: 'groupFooter', node: openFooters.pop() as GridTreeNode<R>, height: rowHeight });
+      }
+    };
     for (const node of pageNodes) {
+      closeFooters(node.depth);
       result.push({ kind: 'row', node });
       if (node.row && getDetailPanelContent && detailIds.includes(node.id)) {
         const params = { id: node.id, row: node.row };
-        result.push({ kind: 'detail', node, height: getDetailPanelHeight?.(params) ?? DEFAULT_DETAIL_HEIGHT });
+        const requested = getDetailPanelHeight?.(params) ?? DEFAULT_DETAIL_HEIGHT;
+        result.push(
+          requested === 'auto'
+            ? { kind: 'detail', node, height: measuredHeights.get(detailKey(node.id)) ?? DEFAULT_DETAIL_HEIGHT, auto: true }
+            : { kind: 'detail', node, height: requested },
+        );
+      }
+      if (aggregationPositions.get(node.id) === 'footer' && isExpanded(node)) {
+        openFooters.push(node);
       }
     }
+    closeFooters(0);
     return result;
-  }, [pageNodes, getDetailPanelContent, getDetailPanelHeight, detailIds]);
+  }, [pageNodes, getDetailPanelContent, getDetailPanelHeight, detailIds, aggregationPositions, isExpanded, rowHeight, measuredHeights]);
+
+  const detailEntriesRef = useRef(new Map<GridRowId, { height: number }>());
+  detailEntriesRef.current = new Map(
+    entries.flatMap((entry) => (entry.kind === 'detail' && entry.auto ? [[detailKey(entry.node.id), entry] as const] : [])),
+  );
 
   const offsets = useMemo(
-    () => getOffsets(entries.map((entry) => (entry.kind === 'detail' ? entry.height : rowHeightFor(entry.node)))),
+    () => getOffsets(entries.map((entry) => (entry.kind === 'row' ? rowHeightFor(entry.node) : entry.height))),
     [entries, rowHeightFor],
   );
 
@@ -1114,6 +1428,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
         delimiter: merged.delimiter,
         includeHeaders: merged.includeHeaders,
         utf8WithBom: merged.utf8WithBom,
+        escapeFormulas: merged.escapeFormulas ?? true,
         raw: ignoreValueFormatterDuringExport,
       });
     },
@@ -1132,13 +1447,51 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     (options?: Omit<GridExcelExportOptions, 'fileName'>) => {
       const merged = { ...excelOptions, ...options };
       const { exportedColumns, exportedRows } = resolveExport(merged);
-      return buildXlsx(exportedRows, exportedColumns, {
+      const columnWidths = Object.fromEntries(columns.map((column, index) => [column.field, widths[index] ?? 0]));
+      // Groups become rows of their own, with the rows below them in Excel outline levels.
+      const nested = isGroup && !isPivoted && !serverRows && !merged.getRowsToExport && merged.includeRowGroups !== false;
+      if (!nested) {
+        return buildXlsx(exportedRows, exportedColumns, {
+          sheetName: merged.sheetName,
+          includeHeaders: merged.includeHeaders,
+          columnWidths,
+          columnsStyles: merged.columnsStyles,
+        });
+      }
+      const groupingColumn = columns.find((column) => column.field === ROW_GROUP_FIELD || column.field === TREE_GROUP_FIELD || column.field.startsWith(ROW_GROUP_FIELD_PREFIX));
+      const labelColumn: GridColDef<R> = {
+        field: EXPORT_GROUP_FIELD,
+        headerName: groupingColumn?.headerName ?? (treeData ? localeText.treeDataGroupHeader : localeText.rowGroupingHeader),
+        width: groupingColumn ? (columnWidths[groupingColumn.field] ?? 220) : 220,
+      };
+      const exportEntries: XlsxEntry<R>[] = [];
+      const visit = (nodes: readonly GridTreeNode<R>[]) => {
+        for (const node of nodes) {
+          if (node.placeholder) {
+            continue;
+          }
+          if (node.row) {
+            exportEntries.push({ kind: 'row', row: node.row, level: node.depth, label: node.groupField === undefined ? node.label : '' });
+          } else {
+            const values =
+              Object.keys(aggregationModel).length > 0
+                ? computeAggregates(collectLeafRows(node), aggregationModel, userColumnMap, aggregationFunctions, node.id)
+                : {};
+            exportEntries.push({ kind: 'group', label: node.label, level: node.depth, values });
+          }
+          visit(node.children);
+        }
+      };
+      visit(roots);
+      return buildXlsx(EMPTY_ARRAY, [labelColumn, ...exportedColumns], {
         sheetName: merged.sheetName,
         includeHeaders: merged.includeHeaders,
-        columnWidths: Object.fromEntries(columns.map((column, index) => [column.field, widths[index] ?? 0])),
+        columnWidths: { ...columnWidths, [EXPORT_GROUP_FIELD]: labelColumn.width ?? 220 },
+        columnsStyles: merged.columnsStyles,
+        entries: exportEntries,
       });
     },
-    [excelOptions, resolveExport, columns, widths],
+    [excelOptions, resolveExport, columns, widths, isGroup, isPivoted, serverRows, treeData, localeText, roots, aggregationModel, userColumnMap, aggregationFunctions],
   );
   const exportDataAsExcel = useCallback(
     (options?: GridExcelExportOptions) =>
@@ -1167,7 +1520,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
       Boolean(column.editable) &&
       row !== undefined &&
       column.type !== 'actions' &&
-      !SPECIAL_FIELDS.has(column.field) &&
+      !isSpecialField(column.field) &&
       (isCellEditable ? isCellEditable(getCellParams(id, row, column)) : true),
     [isCellEditable, getCellParams],
   );
@@ -1206,6 +1559,45 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     },
     [rowsById, visibleUserColumns, canEditCell, emit],
   );
+
+  /** Stores rows changed by edits, pastes and history steps on top of `rows`. */
+  const applyRowResults = useCallback(
+    (results: ReadonlyMap<GridRowId, R>) => {
+      if (results.size === 0) {
+        return;
+      }
+      setRowUpdates((previous) => {
+        const base: RowUpdates<R> =
+          previous.source === rows ? previous : { source: rows, map: EMPTY_MAP, added: EMPTY_ARRAY, deleted: EMPTY_SET };
+        const map = new Map(base.map);
+        for (const [id, row] of results) {
+          map.set(id, row);
+        }
+        return { ...base, map };
+      });
+    },
+    [rows],
+  );
+
+  const historyRef = useRef<{ undo: HistoryEntry<R>[]; redo: HistoryEntry<R>[] }>({ undo: [], redo: [] });
+  // Bumped when a stack changes, so the toolbar buttons follow.
+  const [, setHistoryVersion] = useState(0);
+  const historyStackSizeRef = useRef(historyStackSize);
+  historyStackSizeRef.current = historyStackSize;
+  const pushHistory = useCallback((changes: HistoryEntry<R>['changes']) => {
+    const size = historyStackSizeRef.current;
+    if (size <= 0 || changes.length === 0) {
+      return;
+    }
+    const history = historyRef.current;
+    history.undo = [...history.undo, { changes }].slice(-size);
+    history.redo = [];
+    setHistoryVersion((version) => version + 1);
+  }, []);
+  const clearHistory = useCallback(() => {
+    historyRef.current = { undo: [], redo: [] };
+    setHistoryVersion((version) => version + 1);
+  }, []);
 
   const stopEdit = useCallback(async (options?: { ignoreModifications?: boolean; reason?: GridEditStopReason }) => {
     const edit = editingRef.current;
@@ -1250,19 +1642,220 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     committingRef.current = true;
     try {
       const result = processRowUpdate ? await processRowUpdate(newRow, oldRow) : newRow;
-      setRowUpdates((previous) => {
-        const base = previous.source === rows ? previous : { source: rows, map: EMPTY_MAP, added: EMPTY_ARRAY, deleted: EMPTY_SET };
-        const map = new Map(base.map);
-        map.set(edit.id, result);
-        return { ...base, map };
-      });
+      applyRowResults(new Map([[edit.id, result]]));
+      pushHistory([{ id: edit.id, before: oldRow, after: result }]);
       finish();
     } catch (error) {
       onProcessRowUpdateError?.(error);
     } finally {
       committingRef.current = false;
     }
-  }, [rowsById, userColumnMap, processRowUpdate, onProcessRowUpdateError, rows, emit]);
+  }, [rowsById, userColumnMap, processRowUpdate, onProcessRowUpdateError, applyRowResults, pushHistory, emit]);
+
+  /** Moves one step through the history. A step whose rows changed since (for example new `rows`) empties the history instead. */
+  const applyHistory = async (direction: 'undo' | 'redo'): Promise<boolean> => {
+    const history = historyRef.current;
+    const stack = direction === 'undo' ? history.undo : history.redo;
+    const entry = stack[stack.length - 1];
+    if (!entry || editingRef.current || committingRef.current) {
+      return false;
+    }
+    const matches = entry.changes.every(({ id, before, after }) => {
+      const current = rowsById.get(id);
+      return current !== undefined && sameRow(current, direction === 'undo' ? after : before);
+    });
+    if (!matches) {
+      clearHistory();
+      return false;
+    }
+    if (direction === 'undo') {
+      history.undo = history.undo.slice(0, -1);
+    } else {
+      history.redo = history.redo.slice(0, -1);
+    }
+    committingRef.current = true;
+    const results = new Map<GridRowId, R>();
+    const applied: HistoryEntry<R>['changes'] = [];
+    try {
+      for (const change of entry.changes) {
+        const target = direction === 'undo' ? change.before : change.after;
+        const current = rowsById.get(change.id) as R;
+        try {
+          const result = processRowUpdate ? await processRowUpdate(target, current) : target;
+          results.set(change.id, result);
+          applied.push(direction === 'undo' ? { ...change, before: result } : { ...change, after: result });
+        } catch (error) {
+          onProcessRowUpdateError?.(error);
+        }
+      }
+    } finally {
+      committingRef.current = false;
+    }
+    applyRowResults(results);
+    if (applied.length > 0) {
+      if (direction === 'undo') {
+        history.redo = [...history.redo, { changes: applied }];
+      } else {
+        history.undo = [...history.undo, { changes: applied }];
+      }
+    }
+    setHistoryVersion((version) => version + 1);
+    emit(direction, { rows: [...results].map(([id, row]) => ({ id, row })) });
+    return results.size > 0;
+  };
+  /**
+   * Saves the rows a move into another group or parent changed, through `processRowUpdate`, then puts the moved rows in place.
+   * `moved` are the ids that travel together (a tree row and its descendants), and `place` picks their index among the other rows.
+   */
+  const relocateRows = async (id: GridRowId, updates: ReadonlyMap<GridRowId, R>, moved: readonly GridRowId[], place: (ids: GridRowId[]) => number) => {
+    const results = new Map<GridRowId, R>();
+    for (const [rowId, newRow] of updates) {
+      const oldRow = rowsById.get(rowId) as R;
+      try {
+        results.set(rowId, processRowUpdate ? await processRowUpdate(newRow, oldRow) : newRow);
+      } catch (error) {
+        onProcessRowUpdateError?.(error);
+      }
+    }
+    if (!results.has(id)) {
+      return;
+    }
+    applyRowResults(results);
+    pushHistory([...results].map(([rowId, after]) => ({ id: rowId, before: rowsById.get(rowId) as R, after })));
+    const movedSet = new Set(moved);
+    const ids = mergedRows.map(getRowId).filter((rowId) => !movedSet.has(rowId));
+    const anchor = place(ids);
+    ids.splice(anchor < 0 ? ids.length : anchor, 0, ...moved);
+    setRowOrder({ source: rows, ids });
+    props.onRowOrderChange?.({ row: results.get(id) as R, oldIndex: mergedRows.findIndex((candidate) => getRowId(candidate) === id), targetIndex: ids.indexOf(id) });
+  };
+
+  /** The path of a tree node. A generated node has no row, so it borrows the start of a descendant's path. */
+  const treePathOf = (node: GridTreeNode<R>): string[] => {
+    if (!getTreeDataPath) {
+      return [];
+    }
+    if (node.row) {
+      return getTreeDataPath(node.row);
+    }
+    const descendant = collectRows(node)[0];
+    return descendant ? getTreeDataPath(descendant).slice(0, node.depth + 1) : [node.label];
+  };
+
+  /** Index just after the last row of a node's subtree, among `ids`. */
+  const afterSubtree = (node: GridTreeNode<R>, ids: GridRowId[]) =>
+    Math.max(-1, ...collectRows(node).map((row) => ids.indexOf(getRowId(row)))) + 1;
+
+  /** Moves a tree row, with its descendants, under the node at `parentPath`, placed by `place`. */
+  const moveTreeRow = (id: GridRowId, parentPath: string[], place: (ids: GridRowId[]) => number) => {
+    const entry = siblingIndex.get(id);
+    const row = rowsById.get(id);
+    if (!entry || !row || !props.setTreeDataPath || !getTreeDataPath) {
+      return Promise.resolve();
+    }
+    const oldPath = getTreeDataPath(row);
+    const newPath = [...parentPath, oldPath[oldPath.length - 1] as string];
+    const updates = new Map<GridRowId, R>();
+    // The descendants keep their place under the moved row, so their paths change the same way.
+    const subtree = collectRows(entry.node);
+    for (const descendant of subtree) {
+      const path = getTreeDataPath(descendant);
+      updates.set(getRowId(descendant), props.setTreeDataPath([...newPath, ...path.slice(oldPath.length)], descendant));
+    }
+    return relocateRows(id, updates, subtree.map(getRowId), place);
+  };
+
+  /**
+   * Moves a dragged row onto the place of another. Into another group or parent, the row first gets that group's values or
+   * the new path, saved through `processRowUpdate`, and then takes the target's place. On a group it goes after the group's last row.
+   */
+  const dropRowOn = async (id: GridRowId, targetId: GridRowId) => {
+    if (!isGroup) {
+      moveRow(id, mergedRows.findIndex((row) => getRowId(row) === targetId));
+      return;
+    }
+    const entry = siblingIndex.get(id);
+    const target = siblingIndex.get(targetId);
+    const row = rowsById.get(id);
+    if (!entry || !target || !row) {
+      return;
+    }
+    if (entry.parent === target.parent) {
+      moveRowAmongSiblings(id, targetId);
+      return;
+    }
+    if (isTreeReorder) {
+      if (target.node.row) {
+        await moveTreeRow(id, treePathOf(target.node).slice(0, -1), (ids) => ids.indexOf(targetId));
+      }
+      return;
+    }
+    // Any row of the target group carries the group values to copy.
+    const sample = target.node.row ?? collectLeafRows(target.node)[0];
+    if (!sample) {
+      return;
+    }
+    let next = row;
+    for (const field of rowGroupingModel) {
+      const column = userColumnMap.get(field);
+      if (!column) {
+        continue;
+      }
+      const value = getCellValue(sample, column);
+      if (column.groupingValueSetter) {
+        next = column.groupingValueSetter(column.groupingValueGetter ? column.groupingValueGetter(value, sample) : value, next);
+      } else {
+        next = column.valueSetter ? column.valueSetter(value, next) : { ...next, [field]: sample[field] };
+      }
+    }
+    await relocateRows(id, new Map([[id, next]]), [id], (ids) => (target.node.row ? ids.indexOf(targetId) : afterSubtree(target.node, ids)));
+  };
+
+  /**
+   * Keyboard moves past the edge of a sibling list. Alt+Up/Down at the first or last row of a group moves a grouped row
+   * into the group before or after. Alt+Shift+Right makes a tree row the last child of the row above it, and Alt+Shift+Left
+   * moves it out of its parent, right after the parent. Both need the same props as dragging there.
+   */
+  const moveRowAcross = (id: GridRowId, key: 'up' | 'down' | 'indent' | 'outdent') => {
+    const entry = siblingIndex.get(id);
+    if (!entry || !canChangeParent) {
+      return;
+    }
+    if (isTreeReorder) {
+      const position = entry.siblings.findIndex((node) => node.id === id);
+      if (key === 'indent') {
+        const above = entry.siblings[position - 1];
+        if (above) {
+          void moveTreeRow(id, treePathOf(above), (ids) => afterSubtree(above, ids));
+        }
+      } else if (key === 'outdent' && entry.parent !== null) {
+        const parent = siblingIndex.get(entry.parent)?.node;
+        if (parent) {
+          void moveTreeRow(id, treePathOf(parent).slice(0, -1), (ids) => afterSubtree(parent, ids));
+        }
+      }
+      return;
+    }
+    if (key !== 'up' && key !== 'down') {
+      return;
+    }
+    // The groups rows sit in, in the order they show, across all higher levels.
+    const lastLevel = rowGroupingModel.length - 1;
+    const groups = flattenTree(roots, () => true).filter((node) => !node.row && node.depth === lastLevel);
+    const index = groups.findIndex((node) => node.id === entry.parent);
+    const neighbor = groups[index + (key === 'up' ? -1 : 1)];
+    if (index === -1 || !neighbor) {
+      return;
+    }
+    // Going up it joins the end of the group above, going down the start of the group below.
+    const first = neighbor.children[0];
+    void dropRowOn(id, key === 'up' || !first ? neighbor.id : first.id);
+  };
+
+  moveRowAcrossRef.current = moveRowAcross;
+
+  const canUndo = historyStackSize > 0 && historyRef.current.undo.length > 0;
+  const canRedo = historyStackSize > 0 && historyRef.current.redo.length > 0;
 
   // Controlled edit modes: a changed `rowModesModel` / `cellModesModel` starts or stops edits, and edits started by the user are reported back.
   const resolveRowId = (key: string): GridRowId | undefined => {
@@ -1362,7 +1955,8 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     props.onColumnWidthChange?.({ field, width });
   };
 
-  const autosizeColumns = (options?: GridAutosizeOptions) => {
+  const autosizeColumns = (requested?: GridAutosizeOptions) => {
+    const options = { ...autosizeOptions, ...requested };
     const targets = (
       options?.columns ? visibleUserColumns.filter((column) => options.columns?.includes(column.field)) : visibleUserColumns
     ).filter((column) => column.type !== 'actions');
@@ -1413,7 +2007,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
       }
       for (let col = Math.min(from.col, to.col); col <= Math.max(from.col, to.col); col += 1) {
         const column = columns[col];
-        if (column && !SPECIAL_FIELDS.has(column.field)) {
+        if (column && !isSpecialField(column.field)) {
           (next[id] ??= {})[column.field] = true;
         }
       }
@@ -1459,11 +2053,11 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
 
   /** Writes pasted text into editable cells, starting at the selection or the focused cell. */
   const pasteText = async (text: string) => {
-    const grid = parseClipboardText(text);
-    if (grid.length === 0) {
+    const grid = splitClipboardPastedText ? splitClipboardPastedText(text, clipboardCopyCellDelimiter) : parseClipboardText(text, clipboardCopyCellDelimiter);
+    if (!grid || grid.length === 0) {
       return;
     }
-    const dataColumns = columns.filter((column) => !SPECIAL_FIELDS.has(column.field));
+    const dataColumns = columns.filter((column) => !isSpecialField(column.field));
     const rowPosition = new Map(filteredRows.map((row, index) => [getRowId(row), index]));
     const targets: { id: GridRowId; field: string; text: string }[] = [];
 
@@ -1528,17 +2122,8 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
         }
       }
     }
-    if (results.size > 0) {
-      setRowUpdates((previous) => {
-        const base: RowUpdates<R> =
-          previous.source === rows ? previous : { source: rows, map: EMPTY_MAP, added: EMPTY_ARRAY, deleted: EMPTY_SET };
-        const map = new Map(base.map);
-        for (const [id, row] of results) {
-          map.set(id, row);
-        }
-        return { ...base, map };
-      });
-    }
+    applyRowResults(results);
+    pushHistory([...results].map(([id, after]) => ({ id, before: rowsById.get(id) as R, after })));
   };
 
   const handlePaste = (event: ClipboardEvent) => {
@@ -1553,6 +2138,57 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     event.preventDefault();
     props.onClipboardPaste?.(text);
     void pasteText(text);
+  };
+
+  /** Where a panel or menu opened from the api attaches: the column's header when it is rendered, the grid otherwise. */
+  const panelAnchorFor = (field?: string): HTMLElement => {
+    const scroller = scrollerRef.current as HTMLElement;
+    const col = field ? columns.findIndex((column) => column.field === field) : -1;
+    return (col !== -1 ? scroller?.querySelector<HTMLElement>(`[data-headerindex="${col}"]`) : null) ?? scroller;
+  };
+
+  const upsertFilterItems = (items: readonly GridFilterItem[]) => {
+    let next = [...filterModel.items];
+    for (const item of items) {
+      const index = item.id !== undefined ? next.findIndex((candidate) => candidate.id === item.id) : -1;
+      if (index === -1) {
+        next = disableMultipleColumnsFiltering ? [item] : [...next, item];
+      } else {
+        next[index] = item;
+      }
+    }
+    setFilterModel({ ...filterModel, items: next });
+  };
+
+  const sortedRows = (): R[] => {
+    const comparator = sortingMode === 'client' ? getRowComparator(sortModel, userColumnMap) : null;
+    return comparator ? [...mergedRows].sort(comparator) : [...mergedRows];
+  };
+
+  /** A rendered cell of a row: the given column's, or any. Rows scrolled out of view have none. */
+  const getCellElementFor = (id: GridRowId, field?: string): HTMLElement | null => {
+    const row = pageRowIds.indexOf(id);
+    if (row === -1) {
+      return null;
+    }
+    const selector = field === undefined ? `[data-rowindex="${row}"]` : `[data-rowindex="${row}"][data-field="${field.replace(/["\\]/g, '\\$&')}"]`;
+    return scrollerRef.current?.querySelector<HTMLElement>(selector) ?? null;
+  };
+
+  const findNode = (nodes: readonly GridTreeNode<R>[], id: GridRowId): { node: GridTreeNode<R>; parent: GridRowId | null } | null => {
+    const visit = (level: readonly GridTreeNode<R>[], parent: GridRowId | null): { node: GridTreeNode<R>; parent: GridRowId | null } | null => {
+      for (const node of level) {
+        if (node.id === id) {
+          return { node, parent };
+        }
+        const found = visit(node.children, node.id);
+        if (found) {
+          return found;
+        }
+      }
+      return null;
+    };
+    return visit(nodes, null);
   };
 
   const pin = (field: string, side: 'left' | 'right' | null) => {
@@ -1573,7 +2209,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
       const map = new Map(base.map);
       let added = [...base.added];
       const deleted = new Set(base.deleted);
-      const known = new Map<GridRowId, R>([...rows, ...added].map((row) => [getRowId(row), row]));
+      const known = new Map<GridRowId, R>([...baseRows, ...added].map((row) => [getRowId(row), row]));
       for (const { _action, ...fields } of updates) {
         const id = getRowId(fields as unknown as R);
         if (_action === 'delete') {
@@ -1714,7 +2350,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
         }
       }
       if (colIndex !== undefined) {
-        scroller.scrollLeft = widths.slice(0, colIndex).reduce((total, width) => total + width, 0);
+        scroller.scrollLeft = (isRtl ? -1 : 1) * widths.slice(0, colIndex).reduce((total, width) => total + width, 0);
       }
     },
     setCellFocus: (id, field) => {
@@ -1726,6 +2362,209 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     },
 
     refetch: () => props.onRefetchRequest?.(),
+
+    showFilterPanel: (field) => {
+      const column = field ? userColumnMap.get(field) : undefined;
+      if (column && !disableColumnFilter && isFilterable(column)) {
+        openFilterFor(column, panelAnchorFor(field));
+      } else {
+        setMenuPanel({ kind: 'filter', anchor: panelAnchorFor(field) });
+      }
+    },
+    hideFilterPanel: () => setMenuPanel((current) => (current?.kind === 'filter' ? null : current)),
+    showPreferences: (panel) => setMenuPanel({ kind: panel === 'filters' ? 'filter' : 'columns', anchor: panelAnchorFor() }),
+    hidePreferences: () => setMenuPanel(null),
+    showColumnMenu: (field) => {
+      const column = columns.find((candidate) => candidate.field === field);
+      if (column && hasColumnMenu(column)) {
+        setColumnMenu({ field, anchor: panelAnchorFor(field) });
+      }
+    },
+    hideColumnMenu: () => setColumnMenu(null),
+    toggleColumnMenu: (field) =>
+      columnMenu?.field === field ? setColumnMenu(null) : apiObjectRef.current?.showColumnMenu(field),
+    upsertFilterItem: (item) => upsertFilterItems([item]),
+    upsertFilterItems,
+    deleteFilterItem: (item) =>
+      setFilterModel({
+        ...filterModel,
+        items: filterModel.items.filter((candidate) => (item.id !== undefined ? candidate.id !== item.id : candidate.field !== item.field)),
+      }),
+    setFilterLogicOperator: (operator) => setFilterModel({ ...filterModel, logicOperator: operator }),
+    sortColumn: (field, direction, allowMultipleSorting = false) => {
+      const others = allowMultipleSorting && !disableMultipleColumnsSorting ? sortModel.filter((item) => item.field !== field) : [];
+      const index = sortModel.findIndex((item) => item.field === field);
+      if (!direction) {
+        setSortModel(sortModel.filter((item) => item.field !== field));
+      } else if (allowMultipleSorting && index !== -1) {
+        setSortModel(sortModel.map((item) => (item.field === field ? { field, sort: direction } : item)));
+      } else {
+        setSortModel([...others, { field, sort: direction }]);
+      }
+    },
+    getSortedRowIds: () => sortedRows().map(getRowId),
+    getSortedRows: () => sortedRows(),
+    getRowIdFromRowIndex: (index) => pageRowIds[index],
+    setColumnVisibilityModel: setVisibilityModel,
+    setEditCellValue: async ({ id, field, value }) => {
+      const edit = editingRef.current;
+      if (!edit || edit.id !== id || !(field in edit.values)) {
+        return false;
+      }
+      setEditing((previous) => (previous && previous.id === id ? { ...previous, values: { ...previous.values, [field]: value } } : previous));
+      return true;
+    },
+    getCellMode: (id, field) => (editing?.id === id && editing.values && field in editing.values ? 'edit' : 'view'),
+    getRowMode: (id) => (editing?.id === id && editing.field === undefined ? 'edit' : 'view'),
+    getRowParams: (id) => {
+      const row = rowsById.get(id);
+      return row ? { id, row } : null;
+    },
+    getCellParams: (id, field) => {
+      const row = rowsById.get(id);
+      const column = userColumnMap.get(field);
+      return row && column ? (getCellParams(id, row, column) as unknown as GridCellParams) : null;
+    },
+    getColumnHeaderParams: (field) => {
+      const column = userColumnMap.get(field) ?? columns.find((candidate) => candidate.field === field);
+      return column ? ({ field, colDef: column } as unknown as GridColumnHeaderParams) : null;
+    },
+    getRowNode: (id) => {
+      const found = findNode(allRoots, id) ?? findNode(roots, id);
+      if (!found) {
+        return null;
+      }
+      const { node, parent } = found;
+      return {
+        id: node.id,
+        type: node.children.length > 0 || !node.row ? 'group' : 'leaf',
+        depth: node.depth,
+        parent,
+        children: node.children.map((child) => child.id),
+        groupingField: node.groupField ?? null,
+        groupingKey: node.groupField || !node.row ? node.label : null,
+        childrenExpanded: node.children.length > 0 && isExpanded(node),
+        isAutoGenerated: !node.row,
+      };
+    },
+    getRowGroupChildren: ({ groupId, applyFiltering = false, applySorting = false }) => {
+      const found = findNode(applyFiltering ? roots : allRoots, groupId);
+      if (!found) {
+        return [];
+      }
+      // The filtered tree is sorted already. The unfiltered one is in row order unless sorting is asked for.
+      const below = collectRows(found.node).filter((row) => getRowId(row) !== groupId);
+      const comparator = applySorting && !applyFiltering && sortingMode === 'client' ? getRowComparator(sortModel, userColumnMap) : null;
+      return (comparator ? [...below].sort(comparator) : below).map(getRowId);
+    },
+    addRowGroupingCriteria: (field, index) => {
+      const next = rowGroupingModel.filter((item) => item !== field);
+      next.splice(index === undefined ? next.length : Math.max(0, Math.min(next.length, index)), 0, field);
+      setRowGroupingModel(next);
+    },
+    removeRowGroupingCriteria: (field) => setRowGroupingModel(rowGroupingModel.filter((item) => item !== field)),
+    setRowGroupingCriteriaIndex: (field, index) => {
+      if (!rowGroupingModel.includes(field)) {
+        return;
+      }
+      const next = rowGroupingModel.filter((item) => item !== field);
+      next.splice(Math.max(0, Math.min(next.length, index)), 0, field);
+      setRowGroupingModel(next);
+    },
+    setRows: (next) => {
+      setReplacedRows({ source: rows, rows: next as R[] });
+      setRowUpdates({ source: rows, map: EMPTY_MAP, added: EMPTY_ARRAY, deleted: EMPTY_SET });
+      setRowOrder(null);
+    },
+    updateColumns: (changes) => {
+      const next = [...userColumns];
+      for (const change of changes as GridColDef<R>[]) {
+        const index = next.findIndex((column) => column.field === change.field);
+        if (index === -1) {
+          next.push(change);
+        } else {
+          next[index] = { ...next[index], ...change };
+        }
+      }
+      setColumnUpdates({ source: columnsProp, columns: next });
+    },
+    selectRowRange: ({ startId, endId }, isSelected = true, resetSelection = false) => {
+      const from = pageRowIds.indexOf(startId);
+      const to = pageRowIds.indexOf(endId);
+      if (from === -1 || to === -1) {
+        return;
+      }
+      const ids = pageRowIds.slice(Math.min(from, to), Math.max(from, to) + 1).filter((id) => isSelectable(id, rowsById.get(id)));
+      selectRows(ids, isSelected, resetSelection);
+    },
+    selectCellRange: (start, end, keepOtherSelected = false) => {
+      const position = (cell: { id: GridRowId; field: string }) => ({
+        row: pageRowIds.indexOf(cell.id),
+        col: columns.findIndex((column) => column.field === cell.field),
+      });
+      const from = position(start);
+      const to = position(end);
+      if (!cellSelectionEnabled || from.row === -1 || to.row === -1 || from.col === -1 || to.col === -1) {
+        return;
+      }
+      const next: GridCellSelectionModel = keepOtherSelected
+        ? Object.fromEntries(Object.entries(cellSelection).map(([id, fields]) => [id, { ...fields }]))
+        : {};
+      for (let row = Math.min(from.row, to.row); row <= Math.max(from.row, to.row); row += 1) {
+        const id = pageRowIds[row] as GridRowId;
+        for (let col = Math.min(from.col, to.col); col <= Math.max(from.col, to.col); col += 1) {
+          const column = columns[col];
+          if (column && !isSpecialField(column.field)) {
+            (next[id] ??= {})[column.field] = true;
+          }
+        }
+      }
+      setCellSelection(next);
+    },
+    setExpandedDetailPanels: (ids) => setDetailIds(ids),
+    isColumnPinned: (field) => (pinned.left?.includes(field) ? 'left' : pinned.right?.includes(field) ? 'right' : false),
+    getColumnPosition: (field) => {
+      const index = columns.findIndex((column) => column.field === field);
+      return index === -1 ? 0 : widths.slice(0, index).reduce((total, width) => total + width, 0);
+    },
+    getRootDimensions: () => ({
+      viewportWidth: scrollerRef.current?.clientWidth ?? containerWidth,
+      viewportHeight: scrollerRef.current?.clientHeight ?? containerHeight,
+      contentWidth: totalWidth,
+      contentHeight: offsets[offsets.length - 1] ?? 0,
+      rowHeight,
+      columnHeaderHeight: headerHeight,
+    }),
+    getLocaleText: (key) => localeText[key],
+    getRowElement: (id) => getCellElementFor(id)?.closest<HTMLElement>('[role="row"]') ?? null,
+    getCellElement: (id, field) => getCellElementFor(id, field),
+    getColumnHeaderElement: (field) => {
+      const col = columns.findIndex((column) => column.field === field);
+      return col === -1 ? null : (scrollerRef.current?.querySelector<HTMLElement>(`[data-headerindex="${col}"]`) ?? null);
+    },
+    getRowValue: (row, column) => getCellValue(row as R, column as GridColDef<R>),
+    getRowFormattedValue: (row, column) => getFormattedValue(row as R, column as GridColDef<R>),
+    isRowSelectable: (id) => isSelectable(id, rowsById.get(id)),
+    publishEvent: (event, ...args) => emit(event, ...args),
+    getAggregationModel: () => aggregationModel,
+    getRowGroupingModel: () => [...rowGroupingModel],
+    getColumnVisibilityModel: () => visibilityModel,
+    setAllRowChildrenExpansion: (isExpandedValue) =>
+      setExpansion(new Map(flattenTree(allRoots, () => true).flatMap((node) => (node.children.length > 0 ? [[node.id, isExpandedValue] as const] : [])))),
+    setColumnHeaderFocus: (field) => {
+      const col = columns.findIndex((column) => column.field === field);
+      if (col !== -1 && !showListView) {
+        focusHeader(col);
+      }
+    },
+
+    history: {
+      undo: () => applyHistory('undo'),
+      redo: () => applyHistory('redo'),
+      canUndo: () => canUndo,
+      canRedo: () => canRedo,
+      clear: clearHistory,
+    },
 
     exportState: () => ({
       sorting: { sortModel },
@@ -1789,18 +2628,28 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     }
   });
 
+  // Runs once the first rows are in, so the widths fit real content.
+  const autosizedOnMountRef = useRef(false);
+  useEffect(() => {
+    if (autosizeOnMount && !autosizedOnMountRef.current && filteredRows.length > 0) {
+      autosizedOnMountRef.current = true;
+      autosizeColumns();
+    }
+  });
+
   const handleSort = (column: GridColDef<R>, event: MouseEvent) => {
-    if (disableColumnSorting || column.sortable === false || SPECIAL_FIELDS.has(column.field) || column.type === 'actions') {
+    if (disableColumnSorting || column.sortable === false || isSpecialField(column.field) || column.type === 'actions') {
       return;
     }
-    setSortModel(applySortClick(sortModel, column.field, column.sortingOrder ?? sortingOrder, event.shiftKey && !disableMultipleColumnsSorting));
+    const addToSort = multipleColumnsSortingMode === 'always' || event.shiftKey || event.ctrlKey || event.metaKey;
+    setSortModel(applySortClick(sortModel, column.field, column.sortingOrder ?? sortingOrder, addToSort && !disableMultipleColumnsSorting));
   };
 
   const isSortable = (column: GridColDef<R>) =>
-    !disableColumnSorting && column.sortable !== false && !SPECIAL_FIELDS.has(column.field) && column.type !== 'actions';
+    !disableColumnSorting && column.sortable !== false && !isSpecialField(column.field) && column.type !== 'actions';
 
   const hasColumnMenu = (column: GridColDef<R>) =>
-    !disableColumnMenu && !column.disableColumnMenu && (!SPECIAL_FIELDS.has(column.field) || column.field === ROW_GROUP_FIELD);
+    !disableColumnMenu && !column.disableColumnMenu && (!isSpecialField(column.field) || isRowGroupField(column.field));
 
   // The panels open under the header cell, not under the menu button.
   const headerCellOf = (anchor: HTMLElement) => anchor.closest<HTMLElement>('[role="columnheader"]') ?? anchor;
@@ -1811,7 +2660,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
       setFilterModel({
         ...filterModel,
         items: [
-          ...filterModel.items,
+          ...(disableMultipleColumnsFiltering ? [] : filterModel.items),
           { id: `filter-${Date.now()}`, field: column.field, operator: operator?.value ?? 'contains', value: getInitialFilterValue(operator) },
         ],
       });
@@ -1822,8 +2671,12 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
   const ColumnMenu: ComponentType<ComponentProps<typeof GridColumnMenu<any>>> = slots?.columnMenu ?? GridColumnMenu;
 
   const renderColumnMenu = () => {
-    if (columnMenu?.field === ROW_GROUP_FIELD) {
-      const groupColumn = columns.find((candidate) => candidate.field === ROW_GROUP_FIELD);
+    if (columnMenu && isRowGroupField(columnMenu.field)) {
+      const groupColumn = columns.find((candidate) => candidate.field === columnMenu.field);
+      // A column of the 'multiple' mode stands for one grouped field.
+      const ownField = columnMenu.field.startsWith(ROW_GROUP_FIELD_PREFIX)
+        ? columnMenu.field.slice(ROW_GROUP_FIELD_PREFIX.length, -2)
+        : null;
       return groupColumn ? (
         <ColumnMenu
           {...slotProps?.columnMenu}
@@ -1831,7 +2684,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
           anchorEl={columnMenu.anchor}
           onClose={() => setColumnMenu(null)}
           localeText={localeText}
-          groupedColumns={rowGroupingModel.flatMap((field) => userColumnMap.get(field) ?? [])}
+          groupedColumns={(ownField === null ? rowGroupingModel : [ownField]).flatMap((field) => userColumnMap.get(field) ?? [])}
           onUngroup={(field) => setRowGroupingModel(rowGroupingModel.filter((item) => item !== field))}
           onManageColumns={() => setMenuPanel({ kind: 'columns', anchor: headerCellOf(columnMenu.anchor) })}
         />
@@ -1878,16 +2731,18 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     event.preventDefault();
     event.stopPropagation();
     const startX = event.clientX;
+    // In a right-to-left grid a column grows to the left.
+    const direction = isRtl ? -1 : 1;
     const minWidth = column.minWidth ?? 50;
     const maxWidth = column.maxWidth ?? Infinity;
     const onMove = (moveEvent: globalThis.PointerEvent) => {
-      const width = Math.min(maxWidth, Math.max(minWidth, startWidth + moveEvent.clientX - startX));
+      const width = Math.min(maxWidth, Math.max(minWidth, startWidth + direction * (moveEvent.clientX - startX)));
       setWidthOverrides((previous) => ({ ...previous, [column.field]: width }));
     };
     const onUp = (upEvent: globalThis.PointerEvent) => {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
-      const width = Math.min(maxWidth, Math.max(minWidth, startWidth + upEvent.clientX - startX));
+      const width = Math.min(maxWidth, Math.max(minWidth, startWidth + direction * (upEvent.clientX - startX)));
       props.onColumnWidthChange?.({ field: column.field, width });
     };
     window.addEventListener('pointermove', onMove);
@@ -1925,7 +2780,8 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     if (virtualize) {
       setScrollTop(element.scrollTop);
     }
-    setScrollLeft(element.scrollLeft);
+    // Browsers report a right-to-left scroll position as a negative number.
+    setScrollLeft(Math.abs(element.scrollLeft));
     const atEnd = element.scrollHeight > 0 && element.scrollTop + element.clientHeight >= element.scrollHeight - scrollEndThreshold;
     if (atEnd && !atScrollEndRef.current) {
       emit('rowsScrollEnd', {
@@ -1966,9 +2822,83 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     }
   };
 
+  const focusHeader = (col: number) => {
+    shouldFocusHeaderRef.current = true;
+    setHeaderFocusCol(Math.max(0, Math.min(columns.length - 1, col)));
+  };
+
+  /**
+   * Keys on a focused column header: arrows move between headers and Down goes to the first row, Enter sorts (Shift+Enter adds to
+   * the sort), Ctrl/Cmd+Enter or Alt+Down opens the column menu.
+   */
+  const handleHeaderKeyDown = (event: KeyboardEvent, col: number, sideways: number) => {
+    const column = columns[col];
+    if (sideways !== 0) {
+      focusHeader(col + sideways);
+    } else if (event.key === 'Home' || event.key === 'End') {
+      focusHeader(event.key === 'Home' ? 0 : columns.length - 1);
+    } else if (event.key === 'ArrowDown' && event.altKey) {
+      const anchor = (event.target as HTMLElement).closest<HTMLElement>('[role="columnheader"]');
+      if (!column || !anchor || !hasColumnMenu(column)) {
+        return;
+      }
+      setColumnMenu({ field: column.field, anchor });
+    } else if (event.key === 'ArrowDown') {
+      if (rowEntryIndexes.length === 0) {
+        return;
+      }
+      setHeaderFocusCol(null);
+      focusCell(0, col);
+    } else if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+      const anchor = (event.target as HTMLElement).closest<HTMLElement>('[role="columnheader"]');
+      if (!column || !anchor || !hasColumnMenu(column)) {
+        return;
+      }
+      setColumnMenu({ field: column.field, anchor });
+    } else if (event.key === 'Enter') {
+      if (!column) {
+        return;
+      }
+      emit('columnHeaderClick', { field: column.field, colDef: column }, event);
+      handleSort(column, event as unknown as MouseEvent);
+    } else {
+      return;
+    }
+    event.preventDefault();
+  };
+
+  useEffect(() => {
+    if (!shouldFocusHeaderRef.current || headerFocusCol === null) {
+      return;
+    }
+    const scroller = scrollerRef.current;
+    const element = scroller?.querySelector<HTMLElement>(`[data-headerindex="${headerFocusCol}"]`);
+    if (element) {
+      shouldFocusHeaderRef.current = false;
+      element.focus();
+    } else if (scroller && headerFocusCol >= leftCount && headerFocusCol < rightStart) {
+      // A virtualized header renders once its column scrolls into view, and this effect runs again then.
+      const before = (count: number) => widths.slice(0, count).reduce((total, width) => total + width, 0);
+      scroller.scrollLeft = (isRtl ? -1 : 1) * (before(headerFocusCol) - before(leftCount));
+    }
+  }, [headerFocusCol, colWindow, widths, leftCount, rightStart, isRtl]);
+
   const handleKeyDown = (event: KeyboardEvent) => {
     const target = event.target as HTMLElement;
     if (['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) || target.getAttribute('role') === 'combobox') {
+      return;
+    }
+    const key = event.key.toLowerCase();
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && (key === 'z' || key === 'y') && historyStackSize > 0) {
+      event.preventDefault();
+      void applyHistory(key === 'y' || event.shiftKey ? 'redo' : 'undo');
+      return;
+    }
+    // Right and left swap in a right-to-left layout, so the arrows follow what the user sees.
+    const sideways = event.key === 'ArrowRight' ? (isRtl ? -1 : 1) : event.key === 'ArrowLeft' ? (isRtl ? 1 : -1) : 0;
+    const headerCell = target.closest<HTMLElement>('[data-headerindex]');
+    if (headerCell) {
+      handleHeaderKeyDown(event, Number(headerCell.dataset.headerindex), sideways);
       return;
     }
     const cell = target.closest<HTMLElement>('[data-rowindex]');
@@ -1980,11 +2910,11 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     const entry = entries[rowEntryIndexes[row] ?? -1];
     const column = columns[col];
 
-    if (entry?.node.row && column && !SPECIAL_FIELDS.has(column.field)) {
+    if (entry?.node.row && column && !isSpecialField(column.field)) {
       emit('cellKeyDown', getCellParams(entry.node.id, entry.node.row, column), event);
     }
 
-    const arrowStep: Record<string, [number, number]> = { ArrowDown: [1, 0], ArrowUp: [-1, 0], ArrowRight: [0, 1], ArrowLeft: [0, -1] };
+    const arrowStep: Record<string, [number, number]> = { ArrowDown: [1, 0], ArrowUp: [-1, 0], ArrowRight: [0, sideways], ArrowLeft: [0, sideways] };
     const step = arrowStep[event.key];
     if (cellSelectionEnabled && event.shiftKey && step) {
       const anchor = cellAnchorRef.current ?? { row, col };
@@ -2004,13 +2934,16 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
         focusCell(row + 1, col);
         break;
       case 'ArrowUp':
-        focusCell(row - 1, col);
+        // From the first row the focus goes up into the column headers.
+        if (row === 0 && !showListView) {
+          focusHeader(col);
+        } else {
+          focusCell(row - 1, col);
+        }
         break;
       case 'ArrowRight':
-        focusCell(row, col + 1);
-        break;
       case 'ArrowLeft':
-        focusCell(row, col - 1);
+        focusCell(row, col + sideways);
         break;
       case 'Home':
         focusCell(event.ctrlKey ? 0 : row, 0);
@@ -2041,15 +2974,15 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
           text = buildCsv(
             filteredRows.filter((row) => selectedIds.has(getRowId(row))),
             columns.filter((candidate) => selectedFields.has(candidate.field)),
-            { delimiter: '\t', includeHeaders: false, raw: ignoreValueFormatterDuringExport },
+            { delimiter: clipboardCopyCellDelimiter, includeHeaders: false, raw: ignoreValueFormatterDuringExport },
           );
         } else if (selection.length > 0) {
           text = buildCsv(
             filteredRows.filter((row) => selectedSet.has(getRowId(row))),
             exportColumns,
-            { delimiter: '\t', includeHeaders: false, raw: ignoreValueFormatterDuringExport },
+            { delimiter: clipboardCopyCellDelimiter, includeHeaders: false, raw: ignoreValueFormatterDuringExport },
           );
-        } else if (entry?.node.row && column && !SPECIAL_FIELDS.has(column.field)) {
+        } else if (entry?.node.row && column && !isSpecialField(column.field)) {
           text = getFormattedValue(entry.node.row, column);
         }
         if (text === null) {
@@ -2105,7 +3038,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
       const { col } = focusPosition;
       if (col >= leftCount && col < rightStart && (col < colWindow.start || col >= colWindow.end)) {
         const before = (count: number) => widths.slice(0, count).reduce((total, width) => total + width, 0);
-        scroller.scrollLeft = before(col) - before(leftCount);
+        scroller.scrollLeft = (isRtl ? -1 : 1) * (before(col) - before(leftCount));
       }
     }
   }, [focusPosition, range.start, range.end, rowEntryIndexes, offsets, virtualize, colWindow, widths, leftCount, rightStart]);
@@ -2120,7 +3053,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     const comparable = (value: unknown) => (value instanceof Date ? value.getTime() : value);
     const dataNodes = pageNodes.filter((node) => node.row);
     for (const column of columns) {
-      if (SPECIAL_FIELDS.has(column.field) || column.type === 'actions') {
+      if (isSpecialField(column.field) || column.type === 'actions') {
         continue;
       }
       const valueAt = (node: GridTreeNode<R>) => {
@@ -2223,11 +3156,12 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
       height: '100%',
       justifyContent: JUSTIFY[align],
       position: pin ? 'sticky' : 'relative',
-      left: pin === 'left' ? leftOffsets[index] : undefined,
-      right: pin === 'right' ? rightOffsets[index] : undefined,
+      // Logical sides, so pinned columns stick to the start and end of a right-to-left grid as well.
+      insetInlineStart: pin === 'left' ? leftOffsets[index] : undefined,
+      insetInlineEnd: pin === 'right' ? rightOffsets[index] : undefined,
       zIndex: pin ? (header ? 4 : 2) : undefined,
       bgcolor: pin ? 'background.paper' : undefined,
-      borderRight: (header ? showColumnVerticalBorder : showCellVerticalBorder) ? '1px solid var(--DnaDataGrid-border)' : undefined,
+      borderInlineEnd: (header ? showColumnVerticalBorder : showCellVerticalBorder) ? '1px solid var(--DnaDataGrid-border)' : undefined,
       ...ellipsisSx,
     } as const;
   };
@@ -2235,9 +3169,9 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
   const renderValue = (column: GridColDef<R>, node: GridTreeNode<R>, row: R, wrapText: boolean): ReactNode => {
     const id = node.id;
     if (node.placeholder) {
-      return SPECIAL_FIELDS.has(column.field) ? null : <Skeleton variant="text" sx={{ width: '80%' }} />;
+      return isSpecialField(column.field) ? null : <Skeleton variant="text" sx={{ width: '80%' }} />;
     }
-    if (node.row && serverRows?.isGroupRow(node.row) && !SPECIAL_FIELDS.has(column.field)) {
+    if (node.row && serverRows?.isGroupRow(node.row) && !isSpecialField(column.field)) {
       const fn = aggregationModel[column.field];
       if (!fn || !serverRows.getAggregatedValue) {
         return null;
@@ -2248,12 +3182,12 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     if (column.type === 'actions' && column.getActions) {
       return column.getActions({ id, row, field: column.field });
     }
-    if (SPECIAL_FIELDS.has(column.field) && column.renderCell) {
+    if (isSpecialField(column.field) && column.renderCell) {
       return column.renderCell({ id, field: column.field, value: undefined, formattedValue: '', row, colDef: column });
     }
     const aggregates = nodeAggregates.get(id);
     const aggregateFn = aggregationModel[column.field];
-    if (!node.row && aggregates && aggregateFn && column.field in aggregates) {
+    if (aggregates && aggregateFn && column.field in aggregates && aggregationPositions.get(id) === 'inline') {
       const formatted = formatAggregate(aggregateFn, aggregates[column.field], column, aggregationFunctions[aggregateFn]);
       return `${formatted} (${getAggregationLabel(aggregateFn, aggregationFunctions, localeText).toLowerCase()})`;
     }
@@ -2340,7 +3274,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     const skippedColumns = new Set<number>();
     if (hasColSpan && node.row) {
       columns.forEach((column, index) => {
-        if (skippedColumns.has(index) || column.colSpan === undefined || SPECIAL_FIELDS.has(column.field)) {
+        if (skippedColumns.has(index) || column.colSpan === undefined || isSpecialField(column.field)) {
           return;
         }
         const requested =
@@ -2385,30 +3319,29 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
           }
         }}
         onDragOver={
-          node.row
+          node.row || (canChangeParent && !isTreeReorder && node.groupField)
             ? (event) => {
                 const dragged = dragRowRef.current;
-                if (dragged === null || dragged === node.id) {
+                if (dragged === null || dragged === node.id || !canDropRowOn(dragged, node.id)) {
                   return;
                 }
                 event.preventDefault();
                 const bounds = event.currentTarget.getBoundingClientRect();
-                const ids = mergedRows.map(getRowId);
                 // Dropping on the lower half of a row moves the dragged row below it, unless that would not move it at all.
-                const after = event.clientY > bounds.top + bounds.height / 2 && ids.indexOf(dragged) < ids.indexOf(node.id);
+                const after = event.clientY > bounds.top + bounds.height / 2 && rowOrderPosition(dragged) < rowOrderPosition(node.id);
                 setDropTarget((previous) => (previous?.id === node.id && previous.after === after ? previous : { id: node.id, after }));
               }
             : undefined
         }
         onDrop={
-          node.row
+          node.row || (canChangeParent && !isTreeReorder && node.groupField)
             ? (event) => {
                 event.preventDefault();
                 const dragged = dragRowRef.current;
                 dragRowRef.current = null;
                 setDropTarget(null);
-                if (dragged !== null && dragged !== node.id) {
-                  moveRow(dragged, mergedRows.findIndex((row) => getRowId(row) === node.id));
+                if (dragged !== null && dragged !== node.id && canDropRowOn(dragged, node.id)) {
+                  void dropRowOn(dragged, node.id);
                 }
               }
             : undefined
@@ -2440,7 +3373,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
           const colSpanCount = colSpans.get(index) ?? 1;
           const editingCell = edit !== null && column.field in edit.values && isEditable(column, node);
           const selectedCell = cellSelectionEnabled && Boolean(cellSelection[node.id]?.[column.field]);
-          const selectable = cellSelectionEnabled && rowIndex !== null && !SPECIAL_FIELDS.has(column.field) && !editingCell;
+          const selectable = cellSelectionEnabled && rowIndex !== null && !isSpecialField(column.field) && !editingCell;
           const focused =
             rowIndex !== null &&
             (focusPosition ? focusPosition.row === rowIndex && focusPosition.col === index : rowIndex === 0 && index === 0);
@@ -2455,7 +3388,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
               aria-colspan={colSpanCount > 1 ? colSpanCount : undefined}
               aria-rowspan={rowSpan?.count}
               className={
-                node.row && !SPECIAL_FIELDS.has(column.field)
+                node.row && !isSpecialField(column.field)
                   ? [
                       typeof column.cellClassName === 'function'
                         ? column.cellClassName(getCellParams(node.id, row, column))
@@ -2466,15 +3399,16 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
                       .join(' ') || undefined
                   : undefined
               }
-              aria-selected={cellSelectionEnabled && !SPECIAL_FIELDS.has(column.field) ? selectedCell : undefined}
+              aria-selected={cellSelectionEnabled && !isSpecialField(column.field) ? selectedCell : undefined}
               onMouseDown={selectable ? (event) => handleCellMouseDown(event, node.id, rowIndex, index, column.field) : undefined}
               onMouseEnter={selectable ? () => extendCellDrag(rowIndex, index) : undefined}
-              tabIndex={rowIndex !== null && focused && !editingCell ? 0 : -1}
+              tabIndex={rowIndex !== null && focused && !editingCell && headerFocusCol === null ? 0 : -1}
+              onFocus={headerFocusCol !== null ? () => setHeaderFocusCol(null) : undefined}
               onClick={(event) => {
                 if (rowIndex !== null) {
                   setFocusPosition({ row: rowIndex, col: index });
                 }
-                if (node.row && !SPECIAL_FIELDS.has(column.field)) {
+                if (node.row && !isSpecialField(column.field)) {
                   emit('cellClick', getCellParams(node.id, node.row, column), event);
                 }
               }}
@@ -2511,14 +3445,35 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     );
   };
 
+  /** A row of aggregated values: the grand total, or the footer of a group (`group`), which labels its grouping cell. */
+  const renderAggregateRow = (key: string, values: Record<string, unknown>, rowHeightValue: number, group: GridTreeNode<R> | null) => (
+    <TableRow key={key} role="row" data-group-footer={group ? String(group.id) : undefined} sx={{ height: rowHeightValue, width: totalWidth }}>
+      {renderColumns((column, index) => {
+        const fn = aggregationModel[column.field];
+        const isGroupingCell = group !== null && (column.field === ROW_GROUP_FIELD || column.field === TREE_GROUP_FIELD || column.field === `${ROW_GROUP_FIELD_PREFIX}${group.groupField}__`);
+        return (
+          <TableCell key={column.field} role="gridcell" sx={{ ...cellSx(index, false), fontWeight: 500, color: 'primary.main' }}>
+            {isGroupingCell ? (
+              <Box component="span" sx={{ ...ellipsisSx, paddingInlineStart: column.field.startsWith(ROW_GROUP_FIELD_PREFIX) ? '30px' : `${group.depth * 20 + 30}px` }}>
+                {localeText.groupFooterLabel(group.label)}
+              </Box>
+            ) : fn && column.field in values ? (
+              formatAggregate(fn, values[column.field], column, aggregationFunctions[fn])
+            ) : null}
+          </TableCell>
+        );
+      })}
+    </TableRow>
+  );
+
   const renderHeaderCell = (column: GridColDef<R>, index: number) => {
     const sortItem = sortModel.find((item) => item.field === column.field);
     const sortIndex = sortModel.findIndex((item) => item.field === column.field);
     const sortable = isSortable(column);
     const menuOpen = columnMenu?.field === column.field;
-    const resizable = !disableColumnResize && column.resizable !== false && !SPECIAL_FIELDS.has(column.field);
+    const resizable = !disableColumnResize && column.resizable !== false && !isSpecialField(column.field);
     const reorderable =
-      !disableColumnReorder && !column.disableReorder && index >= leftCount && index < rightStart && !SPECIAL_FIELDS.has(column.field);
+      !disableColumnReorder && !column.disableReorder && index >= leftCount && index < rightStart && !isSpecialField(column.field);
     const direction: GridSortDirection = sortItem?.sort;
     const content = column.renderHeader ? column.renderHeader({ colDef: column }) : (column.headerName ?? column.field);
     const headerAlign = column.headerAlign ?? getDefaultAlign(column);
@@ -2529,6 +3484,14 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
         key={column.field}
         role="columnheader"
         aria-colindex={index + 1}
+        data-headerindex={index}
+        tabIndex={headerFocusCol === index ? 0 : -1}
+        onFocus={(event) => {
+          // Only the header itself takes the tab stop, not its menu button.
+          if (event.target === event.currentTarget && headerFocusCol !== index) {
+            setHeaderFocusCol(index);
+          }
+        }}
         aria-sort={direction === 'asc' ? 'ascending' : direction === 'desc' ? 'descending' : undefined}
         className={column.headerClassName}
         title={column.description}
@@ -2544,6 +3507,8 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
           ...cellSx(index, true),
           cursor: sortable ? 'pointer' : 'default',
           userSelect: 'none',
+          outlineOffset: -2,
+          '&:focus-visible': { outline: '2px solid', outlineColor: 'primary.main' },
           flexDirection: headerAlign === 'right' ? 'row-reverse' : 'row',
           justifyContent: 'space-between',
           // The menu button takes no room until it shows, so it does not squeeze the header text.
@@ -2610,7 +3575,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
             sx={{
               position: 'absolute',
               top: 0,
-              right: 0,
+              insetInlineEnd: 0,
               bottom: 0,
               width: 10,
               cursor: 'col-resize',
@@ -2619,7 +3584,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
                 content: '""',
                 position: 'absolute',
                 top: '50%',
-                right: 4,
+                insetInlineEnd: 4,
                 width: 2,
                 height: 24,
                 transform: 'translateY(-50%)',
@@ -2634,7 +3599,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
 
   const renderHeaderFilterCell = (column: GridColDef<R>, index: number) => {
     const item = filterModel.items.find((candidate) => candidate.field === column.field);
-    const filterable = !disableColumnFilter && isFilterable(column) && !SPECIAL_FIELDS.has(column.field);
+    const filterable = !disableColumnFilter && isFilterable(column) && !isSpecialField(column.field);
     return (
       <TableCell key={column.field} role="columnheader" aria-colindex={index + 1} sx={{ ...cellSx(index, true), overflow: 'visible' }}>
         {filterable && (
@@ -2650,7 +3615,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
                     ? filterModel.items.filter((candidate) => candidate !== item)
                     : item
                       ? filterModel.items.map((candidate) => (candidate === item ? next : candidate))
-                      : [...filterModel.items, next],
+                      : [...(disableMultipleColumnsFiltering ? [] : filterModel.items), next],
               })
             }
           />
@@ -2663,7 +3628,10 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
 
   const visibleEntries = entries.slice(range.start, range.end);
   const spacerSx = { display: 'block', width: totalWidth, borderBottom: 0, p: 0 } as const;
-  const headerRowCount = groupHeaderRows.length + 1 + (headerFilters ? 1 : 0);
+  const headerRowCount = showListView ? 0 : groupHeaderRows.length + 1 + (headerFilters ? 1 : 0);
+  const headerBlockHeight = showListView
+    ? 0
+    : groupHeaderRows.length * (props.columnGroupHeaderHeight ?? headerHeight) + headerHeight + (headerFilters ? filterRowHeight : 0);
   const totalRowCount = rootCount;
   const toolbarProps = {
     columns: userColumns,
@@ -2683,6 +3651,10 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     filterColumns: pivoting?.sourceColumns,
     onOpenPivotPanel: pivoting ? (anchor: HTMLElement) => setMenuPanel({ kind: 'pivot', anchor }) : undefined,
     pivotActive: pivoting?.enabled,
+    ...(historyStackSize > 0 && !isPivoted
+      ? { onUndo: () => void applyHistory('undo'), onRedo: () => void applyHistory('redo'), canUndo, canRedo }
+      : {}),
+    disableMultipleColumnsFiltering,
   };
   const Toolbar: ComponentType<GridToolbarProps<any>> = slots?.toolbar ?? GridToolbar;
   const FilterPanel: ComponentType<GridFilterPanelSlotProps<any>> = slots?.filterPanel ?? GridFilterPanel;
@@ -2696,12 +3668,29 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
   const footerRowCount = paginationMode === 'server' ? (rowCount ?? totalRowCount) : totalRowCount;
   const bottomRows = pinnedRows?.bottom ?? EMPTY_ARRAY;
   const topRows = pinnedRows?.top ?? EMPTY_ARRAY;
-  const footerValues = isPivoted ? (pivoting?.totals ?? null) : serverAggregated ? (serverRows?.footerAggregates ?? null) : footerAggregates;
+  const footerValues = serverAggregated ? (serverRows?.footerAggregates ?? null) : isPivoted ? (pivoting?.totals ?? null) : footerAggregates;
   const hasFooterAggregates = footerValues !== null && Object.keys(footerValues).length > 0;
+
+  // The page size that fills the body: the scroller less the headers, the pinned rows and the aggregation footer.
+  const autoSize =
+    autoPageSize && pagination && containerHeight > 0
+      ? Math.max(
+          1,
+          Math.floor(
+            (containerHeight - headerBlockHeight - (topRows.length + bottomRows.length + (hasFooterAggregates ? 1 : 0)) * rowHeight) / rowHeight,
+          ),
+        )
+      : null;
+  useEffect(() => {
+    if (autoSize !== null && autoSize !== paginationModel.pageSize) {
+      setPaginationModel({ ...paginationModel, pageSize: autoSize });
+    }
+  }, [autoSize, paginationModel, setPaginationModel]);
 
   return (
     <Paper
       variant="outlined"
+      dir={isRtl ? 'rtl' : undefined}
       sx={[
         (theme) => getBorderVariables(theme),
         { display: 'flex', flexDirection: 'column', position: 'relative', p: 2, pb: showFooter ? 0 : 2, borderRadius: '8px', '&&': { borderColor: 'var(--DnaDataGrid-border)' } },
@@ -2722,6 +3711,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
             filterModel={filterModel}
             onFilterModelChange={setFilterModel}
             localeText={localeText}
+            disableMultipleFilters={disableMultipleColumnsFiltering}
             {...slotProps?.filterPanel}
           />
         )}
@@ -2736,7 +3726,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
         )}
         {menuPanel?.kind === 'pivot' && pivoting && (
           <PivotPanel
-            columns={pivoting.sourceColumns}
+            columns={pivoting.pivotColumns}
             active={pivoting.enabled}
             onActiveChange={pivoting.setEnabled}
             model={pivoting.model}
@@ -2776,6 +3766,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
             '& .MuiTableCell-root': { paddingBlock: 0, paddingInline: '10px', boxSizing: 'border-box' },
           }}
         >
+          {!showListView && (
           <TableHead sx={{ position: 'sticky', top: 0, zIndex: 3, bgcolor: 'background.paper' }}>
             {groupHeaderRows.map((cells, level) => (
               <TableRow key={`group-${level}`} sx={{ height: props.columnGroupHeaderHeight ?? headerHeight }}>
@@ -2798,14 +3789,15 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
               {renderColumns(renderHeaderCell)}
             </TableRow>
             {headerFilters && (
-              <TableRow aria-rowindex={headerRowCount} sx={{ height: headerHeight }}>
+              <TableRow aria-rowindex={headerRowCount} sx={{ height: filterRowHeight }}>
                 {renderColumns(renderHeaderFilterCell)}
               </TableRow>
             )}
           </TableHead>
+          )}
 
           {topRows.length > 0 && (
-            <TableBody sx={{ position: 'sticky', top: headerHeight * headerRowCount, zIndex: 2, bgcolor: 'background.paper' }}>
+            <TableBody sx={{ position: 'sticky', top: headerBlockHeight, zIndex: 2, bgcolor: 'background.paper' }}>
               {topRows.map((row, index) => renderRow(getPinnedRowNode(row), null, headerRowCount + index + 1))}
             </TableBody>
           )}
@@ -2814,13 +3806,21 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
             {range.offsetTop > 0 && <TableRow aria-hidden role="presentation" sx={{ ...spacerSx, height: range.offsetTop }} />}
             {visibleEntries.map((entry, offset) => {
               const entryIndex = range.start + offset;
+              if (entry.kind === 'groupFooter') {
+                return renderAggregateRow(`${entry.node.id}-footer`, nodeAggregates.get(entry.node.id) ?? EMPTY_OBJECT, entry.height, entry.node);
+              }
               if (entry.kind === 'detail') {
                 const panelWidth = Math.min(totalWidth, containerWidth || totalWidth);
                 return (
-                  <TableRow key={`${entry.node.id}-detail`} role="row" sx={{ height: entry.height, width: totalWidth }}>
+                  <TableRow
+                    key={`${entry.node.id}-detail`}
+                    ref={entry.auto ? getRowRef(detailKey(entry.node.id)) : undefined}
+                    role="row"
+                    sx={{ height: entry.auto ? 'auto' : entry.height, width: totalWidth }}
+                  >
                     <TableCell
                       role="gridcell"
-                      sx={{ position: 'sticky', left: 0, width: panelWidth, height: '100%', overflow: 'auto', display: 'block', py: 0 }}
+                      sx={{ position: 'sticky', insetInlineStart: 0, width: panelWidth, height: entry.auto ? 'auto' : '100%', overflow: entry.auto ? 'visible' : 'auto', display: 'block', py: 0 }}
                     >
                       {entry.node.row && getDetailPanelContent?.({ id: entry.node.id, row: entry.node.row })}
                     </TableCell>
@@ -2835,7 +3835,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
               <TableRow>
                 <TableCell
                   role="gridcell"
-                  sx={{ position: 'sticky', left: 0, width: containerWidth || '100%', minHeight: rowHeight * 2, justifyContent: 'center', color: 'text.secondary' }}
+                  sx={{ position: 'sticky', insetInlineStart: 0, width: containerWidth || '100%', minHeight: rowHeight * 2, justifyContent: 'center', color: 'text.secondary' }}
                 >
                   {NoRowsOverlay ? <NoRowsOverlay localeText={localeText} {...slotProps?.noRowsOverlay} /> : localeText.noRowsLabel}
                 </TableCell>
@@ -2846,18 +3846,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
           {(bottomRows.length > 0 || hasFooterAggregates) && (
             <TableFooter sx={{ position: 'sticky', bottom: 0, zIndex: 3, bgcolor: 'background.paper' }}>
               {bottomRows.map((row, index) => renderRow(getPinnedRowNode(row), null, headerRowCount + topRows.length + totalRowCount + index + 1))}
-              {hasFooterAggregates && footerValues && (
-                <TableRow role="row" sx={{ height: rowHeight, width: totalWidth }}>
-                  {renderColumns((column, index) => {
-                    const fn = aggregationModel[column.field];
-                    return (
-                      <TableCell key={column.field} role="gridcell" sx={{ ...cellSx(index, false), fontWeight: 500, color: 'primary.main' }}>
-                        {fn && column.field in footerValues ? formatAggregate(fn, footerValues[column.field], column, aggregationFunctions[fn]) : null}
-                      </TableCell>
-                    );
-                  })}
-                </TableRow>
-              )}
+              {hasFooterAggregates && footerValues && renderAggregateRow('__aggregation-footer__', footerValues, rowHeight, null)}
             </TableFooter>
           )}
         </Table>
@@ -2875,7 +3864,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
               count={footerRowCount}
               page={paginationMode === 'server' ? paginationModel.page : page}
               pageSize={paginationModel.pageSize}
-              pageSizeOptions={pageSizeOptions}
+              pageSizeOptions={autoPageSize ? EMPTY_ARRAY : pageSizeOptions}
               onPaginationModelChange={setPaginationModel}
               localeText={localeText}
               {...slotProps?.pagination}
@@ -2887,7 +3876,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
               count={footerRowCount}
               page={paginationMode === 'server' ? paginationModel.page : page}
               rowsPerPage={paginationModel.pageSize}
-              rowsPerPageOptions={[...pageSizeOptions]}
+              rowsPerPageOptions={autoPageSize ? [] : [...pageSizeOptions]}
               labelRowsPerPage={localeText.paginationRowsPerPage}
               onPageChange={(_, nextPage) => setPaginationModel({ ...paginationModel, page: nextPage })}
               onRowsPerPageChange={(event) => setPaginationModel({ page: 0, pageSize: Number(event.target.value) })}
@@ -2913,8 +3902,44 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
 /** Loads `rows` and `rowCount` from the data source whenever what they depend on changes. */
 function DataSourceGrid<R extends GridValidRowModel>(props: DataGridProps<R> & { dataSource: GridDataSource<R> }) {
   const { pageSizeOptions = DEFAULT_PAGE_SIZE_OPTIONS } = props;
-  const serverProps = useGridDataSource(props, { page: 0, pageSize: pageSizeValue(pageSizeOptions[0] ?? 10) });
-  return <DataGridBase<R> {...props} {...serverProps} />;
+  const { serverPivot, ...serverProps } = useGridDataSource(props, { page: 0, pageSize: pageSizeValue(pageSizeOptions[0] ?? 10) });
+  const sourceRowsRef = useRef<GridPivoting<R>['sourceRowsRef']['current']>(null);
+  const pivotColumns = useMemo(
+    () =>
+      props.getPivotDerivedColumns
+        ? withPivotDerivedColumns(props.columns, props.getPivotDerivedColumns as (column: GridColDef<R>) => GridColDef<R>[] | undefined)
+        : props.columns,
+    [props.columns, props.getPivotDerivedColumns],
+  );
+  if (!serverPivot.available) {
+    return <DataGridBase<R> {...props} {...serverProps} />;
+  }
+  const layout = serverPivot.layout;
+  // Derived fields only exist for the server when the consumer asked for them, since the server has to compute them.
+  const pivoting: GridPivoting<R> = {
+    enabled: serverPivot.enabled,
+    applied: serverPivot.applied,
+    model: serverPivot.model,
+    setEnabled: serverPivot.setEnabled,
+    setModel: serverPivot.setModel,
+    sourceColumns: props.columns,
+    pivotColumns,
+    totals: null,
+    rowLabelColumn: null,
+    sourceRowsRef,
+  };
+  const { rowGroupingModel: _rows, onRowGroupingModelChange: _onRows, onAggregationModelChange: _onAggregation, ...overrides } = PIVOT_ROW_PROP_OVERRIDES;
+  const pivotProps = layout
+    ? ({
+        ...overrides,
+        columnGroupingModel: layout.columnGroupingModel,
+        groupingColDef: {
+          ...(layout.rowHeaderName ? { headerName: layout.rowHeaderName } : {}),
+          ...(typeof props.groupingColDef === 'function' ? props.groupingColDef({ groupingField: null, fields: [] }) : props.groupingColDef),
+        },
+      } as unknown as Partial<DataGridProps<R>>)
+    : undefined;
+  return <DataGridBase<R> {...props} {...serverProps} {...pivotProps} pivoting={pivoting} />;
 }
 
 const getPivotRowId = (row: GridValidRowModel): GridRowId => row[PIVOT_ROW_ID];
@@ -2968,6 +3993,13 @@ function PivotingGrid<R extends GridValidRowModel>(props: DataGridProps<R>) {
   const applied = available && enabled && !isPivotModelEmpty(model);
   const functions = props.aggregationFunctions ?? GRID_AGGREGATION_FUNCTIONS;
   const totalLabel = props.localeText?.pivotTotal ?? DEFAULT_LOCALE_TEXT.pivotTotal;
+  const { getPivotDerivedColumns = getDefaultPivotDerivedColumns, pivotingColDef, ignoreDiacritics } = props;
+
+  // The pivot panel offers derived fields, such as the year of a date, next to the columns.
+  const pivotColumns = useMemo(
+    () => withPivotDerivedColumns(columns, getPivotDerivedColumns as (column: GridColDef<R>) => GridColDef<R>[] | undefined),
+    [columns, getPivotDerivedColumns],
+  );
 
   const pivot = useMemo<GridPivotResult | null>(() => {
     if (!applied) {
@@ -2976,15 +4008,16 @@ function PivotingGrid<R extends GridValidRowModel>(props: DataGridProps<R>) {
     const columnsByField = new Map(columns.map((column) => [column.field, column]));
     const edited = sourceRowsRef.current;
     const sourceRows = edited?.source === rows ? edited.rows : rows;
-    const predicate = getFilterPredicate(filterModel, columnsByField, columns);
+    const predicate = getFilterPredicate(filterModel, columnsByField, columns, { ignoreDiacritics });
     return computePivot({
       rows: predicate ? sourceRows.filter(predicate) : sourceRows,
-      columns: columnsByField,
+      columns: new Map(pivotColumns.map((column) => [column.field, column])),
       model,
       functions,
       totalLabel,
+      pivotingColDef: pivotingColDef as Parameters<typeof computePivot>[0]['pivotingColDef'],
     });
-  }, [applied, rows, columns, filterModel, model, functions, totalLabel]);
+  }, [applied, rows, columns, pivotColumns, filterModel, model, functions, totalLabel, pivotingColDef, ignoreDiacritics]);
 
   const pivoting: GridPivoting<R> | undefined = available
     ? {
@@ -2994,6 +4027,7 @@ function PivotingGrid<R extends GridValidRowModel>(props: DataGridProps<R>) {
         setEnabled,
         setModel,
         sourceColumns: columns,
+        pivotColumns,
         totals: pivot?.totals ?? null,
         rowLabelColumn: (pivot?.rowLabelColumn as GridColDef<R> | undefined) ?? null,
         sourceRowsRef,
@@ -3010,7 +4044,10 @@ function PivotingGrid<R extends GridValidRowModel>(props: DataGridProps<R>) {
         getTreeDataPath: getPivotRowPath,
         aggregationModel: pivot.aggregationModel,
         columnGroupingModel: pivot.columnGroupingModel,
-        groupingColDef: { ...(pivot.rowHeaderName ? { headerName: pivot.rowHeaderName } : {}), ...props.groupingColDef },
+        groupingColDef: {
+          ...(pivot.rowHeaderName ? { headerName: pivot.rowHeaderName } : {}),
+          ...(typeof props.groupingColDef === 'function' ? props.groupingColDef({ groupingField: null, fields: [] }) : props.groupingColDef),
+        },
         // The source rows were filtered above, and the filter fields do not exist on the generated rows.
         filterMode: 'server',
       } as unknown as Partial<DataGridProps<R>>)
@@ -3019,6 +4056,34 @@ function PivotingGrid<R extends GridValidRowModel>(props: DataGridProps<R>) {
   return <DataGridBase<R> {...props} filterModel={filterModel} onFilterModelChange={setFilterModel} {...pivotProps} pivoting={pivoting} />;
 }
 
-export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(props: DataGridProps<R>) {
+/** Name under `theme.components` whose `defaultProps` apply to every grid, as in MUI X. */
+export const GRID_THEME_COMPONENT_NAME = 'MuiDataGrid';
+
+/**
+ * Props from `theme.components.MuiDataGrid.defaultProps` under the grid's own. `localeText` and `slotProps` merge key by key,
+ * so a locale set in the theme keeps working when a grid overrides one text.
+ */
+function useGridThemeProps<R extends GridValidRowModel>(props: DataGridProps<R>): DataGridProps<R> {
+  const theme = useTheme();
+  const defaults = (theme.components as Record<string, { defaultProps?: Partial<DataGridProps<R>> } | undefined> | undefined)?.[
+    GRID_THEME_COMPONENT_NAME
+  ]?.defaultProps;
+  return useMemo(() => {
+    if (!defaults) {
+      return props;
+    }
+    const merged = { ...defaults, ...props } as DataGridProps<R>;
+    if (defaults.localeText || props.localeText) {
+      merged.localeText = { ...defaults.localeText, ...props.localeText };
+    }
+    if (defaults.slotProps || props.slotProps) {
+      merged.slotProps = { ...defaults.slotProps, ...props.slotProps };
+    }
+    return merged;
+  }, [defaults, props]);
+}
+
+export function DataGrid<R extends GridValidRowModel = GridValidRowModel>(inProps: DataGridProps<R>) {
+  const props = useGridThemeProps(inProps);
   return props.dataSource ? <DataSourceGrid<R> {...props} dataSource={props.dataSource} /> : <PivotingGrid<R> {...props} />;
 }

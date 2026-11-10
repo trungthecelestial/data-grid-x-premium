@@ -1,4 +1,4 @@
-import type { GridColDef, GridValidRowModel } from '../DataGrid.types';
+import type { GridColDef, GridExcelCellStyle, GridValidRowModel } from '../DataGrid.types';
 import { getCellValue, getFormattedValue } from './columns';
 
 export const XLSX_MIME_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -10,7 +10,18 @@ export interface XlsxOptions {
   includeHeaders?: boolean;
   /** Column widths in px, by field. Used to size the sheet's columns. */
   columnWidths?: Readonly<Record<string, number>>;
+  /** Cell styles by field. */
+  columnsStyles?: Readonly<Record<string, GridExcelCellStyle>>;
+  /**
+   * Replaces `rows` with rows that carry an outline level, and group rows written in bold.
+   * A group row writes `label` in the first column and its `values` (by field) in the others.
+   */
+  entries?: readonly XlsxEntry<any>[];
 }
+
+export type XlsxEntry<R extends GridValidRowModel> =
+  | { kind: 'row'; row: R; level: number; label?: string }
+  | { kind: 'group'; label: string; level: number; values: Readonly<Record<string, unknown>> };
 
 // --- zip -------------------------------------------------------------------------------------------------------------
 
@@ -134,78 +145,170 @@ export function toExcelSerial(date: Date): number {
   return (date.getTime() - date.getTimezoneOffset() * 60000) / 86400000 + 25569;
 }
 
-const STYLE_HEADER = 1;
-const STYLE_DATE = 2;
-const STYLE_DATE_TIME = 3;
-
 const sanitizeSheetName = (name: string | undefined) => {
   const cleaned = (name ?? '').replace(/[[\]:*?/\\]/g, ' ').trim().slice(0, 31);
   return cleaned === '' ? 'Sheet1' : cleaned;
 };
+
+/** Collects the fonts, fills, number formats and cell formats a sheet uses, and writes them as styles.xml. */
+class StyleSheet {
+  private fonts = ['<font><sz val="11"/><name val="Calibri"/></font>'];
+  private fills = ['<fill><patternFill patternType="none"/></fill>', '<fill><patternFill patternType="gray125"/></fill>'];
+  private numFmts: string[] = [];
+  private xfs = ['<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'];
+
+  private indexOf(list: string[], entry: string): number {
+    const index = list.indexOf(entry);
+    if (index !== -1) {
+      return index;
+    }
+    list.push(entry);
+    return list.length - 1;
+  }
+
+  /** The index of the cell format for a style, `0` being the default. `numFmtId` is a built-in format such as 14 for dates. */
+  get(style: GridExcelCellStyle | undefined, builtInFormat = 0, bold = false): number {
+    const font = { ...style?.font, bold: Boolean(style?.font?.bold) || bold };
+    const fontXml =
+      '<font>' +
+      (font.bold ? '<b/>' : '') +
+      (font.italic ? '<i/>' : '') +
+      (font.underline ? '<u/>' : '') +
+      `<sz val="${font.size ?? 11}"/>` +
+      (font.color?.argb ? `<color rgb="${toArgb(font.color.argb)}"/>` : '') +
+      '<name val="Calibri"/></font>';
+    const fontId = this.indexOf(this.fonts, fontXml);
+    const fillColor = style?.fill?.fgColor?.argb;
+    const fillId = fillColor
+      ? this.indexOf(this.fills, `<fill><patternFill patternType="solid"><fgColor rgb="${toArgb(fillColor)}"/><bgColor indexed="64"/></patternFill></fill>`)
+      : 0;
+    const numFmtId = style?.numFmt ? 164 + this.indexOf(this.numFmts, style.numFmt) : builtInFormat;
+    const alignment = style?.alignment;
+    const alignmentXml =
+      alignment && (alignment.horizontal || alignment.vertical || alignment.wrapText)
+        ? `<alignment${alignment.horizontal ? ` horizontal="${alignment.horizontal}"` : ''}${
+            alignment.vertical ? ` vertical="${alignment.vertical === 'middle' ? 'center' : alignment.vertical}"` : ''
+          }${alignment.wrapText ? ' wrapText="1"' : ''}/>`
+        : '';
+    const xf =
+      `<xf numFmtId="${numFmtId}" fontId="${fontId}" fillId="${fillId}" borderId="0" xfId="0"` +
+      `${numFmtId ? ' applyNumberFormat="1"' : ''}${fontId ? ' applyFont="1"' : ''}${fillId ? ' applyFill="1"' : ''}` +
+      (alignmentXml ? ` applyAlignment="1">${alignmentXml}</xf>` : '/>');
+    return this.indexOf(this.xfs, xf);
+  }
+
+  toXml(): string {
+    const numFmts = this.numFmts.length
+      ? `<numFmts count="${this.numFmts.length}">${this.numFmts
+          .map((format, index) => `<numFmt numFmtId="${164 + index}" formatCode="${escapeXml(format)}"/>`)
+          .join('')}</numFmts>`
+      : '';
+    return (
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
+      numFmts +
+      `<fonts count="${this.fonts.length}">${this.fonts.join('')}</fonts>` +
+      `<fills count="${this.fills.length}">${this.fills.join('')}</fills>` +
+      '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>' +
+      '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>' +
+      `<cellXfs count="${this.xfs.length}">${this.xfs.join('')}</cellXfs>` +
+      '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>' +
+      '</styleSheet>'
+    );
+  }
+}
+
+/** Excel wants ARGB. A six digit RGB color gets a full alpha. */
+const toArgb = (color: string) => {
+  const hex = color.replace(/^#/, '').toUpperCase();
+  return hex.length === 6 ? `FF${hex}` : hex;
+};
+
+const BUILT_IN_DATE = 14;
+const BUILT_IN_DATE_TIME = 22;
 
 function textCell(reference: string, text: string, style = 0): string {
   const styleAttribute = style ? ` s="${style}"` : '';
   return `<c r="${reference}" t="inlineStr"${styleAttribute}><is><t xml:space="preserve">${escapeXml(text)}</t></is></c>`;
 }
 
-function dataCell<R extends GridValidRowModel>(reference: string, row: R, column: GridColDef<R>): string {
-  const value = getCellValue(row, column);
+function valueCell<R extends GridValidRowModel>(
+  reference: string,
+  value: unknown,
+  row: R,
+  column: GridColDef<R>,
+  styles: StyleSheet,
+  columnStyle: GridExcelCellStyle | undefined,
+  bold: boolean,
+  formatted?: string,
+): string {
   if (value === null || value === undefined || value === '') {
     return '';
   }
+  const style = styles.get(columnStyle, 0, bold);
+  const styleAttribute = style ? ` s="${style}"` : '';
   if (typeof value === 'number') {
-    return Number.isFinite(value) ? `<c r="${reference}"><v>${value}</v></c>` : '';
+    return Number.isFinite(value) ? `<c r="${reference}"${styleAttribute}><v>${value}</v></c>` : '';
   }
   if (typeof value === 'boolean') {
-    return `<c r="${reference}" t="b"><v>${value ? 1 : 0}</v></c>`;
+    return `<c r="${reference}" t="b"${styleAttribute}><v>${value ? 1 : 0}</v></c>`;
   }
   if (column.type === 'date' || column.type === 'dateTime' || value instanceof Date) {
     const date = value instanceof Date ? value : new Date(value as string | number);
     if (!Number.isNaN(date.getTime())) {
-      const style = column.type === 'dateTime' ? STYLE_DATE_TIME : STYLE_DATE;
-      return `<c r="${reference}" s="${style}"><v>${toExcelSerial(date)}</v></c>`;
+      const dateStyle = styles.get(columnStyle, column.type === 'dateTime' ? BUILT_IN_DATE_TIME : BUILT_IN_DATE, bold);
+      return `<c r="${reference}" s="${dateStyle}"><v>${toExcelSerial(date)}</v></c>`;
     }
   }
-  const text = getFormattedValue(row, column, value);
-  return text === '' ? '' : textCell(reference, text);
+  const text = formatted ?? getFormattedValue(row, column, value);
+  return text === '' ? '' : textCell(reference, text, style);
 }
 
-const STYLES_XML =
-  '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
-  '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
-  '<fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts>' +
-  '<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>' +
-  '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>' +
-  '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>' +
-  '<cellXfs count="4">' +
-  '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>' +
-  '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>' +
-  '<xf numFmtId="14" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>' +
-  '<xf numFmtId="22" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>' +
-  '</cellXfs>' +
-  '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>' +
-  '</styleSheet>';
-
-/** Builds an .xlsx workbook with one sheet. Numbers, booleans and dates keep their type so Excel can calculate with them. */
+/**
+ * Builds an .xlsx workbook with one sheet. Numbers, booleans and dates keep their type so Excel can calculate with them.
+ * With `entries`, rows are nested in outline levels that Excel can collapse.
+ */
 export function buildXlsx<R extends GridValidRowModel>(
   rows: readonly R[],
   columns: readonly GridColDef<R>[],
-  { sheetName, includeHeaders = true, columnWidths = {} }: XlsxOptions = {},
+  { sheetName, includeHeaders = true, columnWidths = {}, columnsStyles = {}, entries }: XlsxOptions = {},
 ): Uint8Array {
+  const styles = new StyleSheet();
   const sheetRows: string[] = [];
   let rowNumber = 0;
+  let maxLevel = 0;
 
   if (includeHeaders) {
     rowNumber += 1;
+    const headerStyle = styles.get(undefined, 0, true);
     const cells = columns.map((column, index) =>
-      textCell(`${columnLetter(index)}${rowNumber}`, column.headerName ?? column.field, STYLE_HEADER),
+      textCell(`${columnLetter(index)}${rowNumber}`, column.headerName ?? column.field, headerStyle),
     );
     sheetRows.push(`<row r="${rowNumber}">${cells.join('')}</row>`);
   }
-  for (const row of rows) {
+  const rowEntries: readonly XlsxEntry<R>[] = entries ?? rows.map((row) => ({ kind: 'row' as const, row, level: 0 }));
+  for (const entry of rowEntries) {
     rowNumber += 1;
-    const cells = columns.map((column, index) => dataCell(`${columnLetter(index)}${rowNumber}`, row, column)).join('');
-    sheetRows.push(`<row r="${rowNumber}">${cells}</row>`);
+    maxLevel = Math.max(maxLevel, entry.level);
+    const bold = entry.kind === 'group';
+    const cells = columns
+      .map((column, index) => {
+        const reference = `${columnLetter(index)}${rowNumber}`;
+        const columnStyle = columnsStyles[column.field];
+        // The first column carries the group label, or the row's place in the tree.
+        if (index === 0 && entry.label !== undefined) {
+          return entry.label === '' ? '' : textCell(reference, entry.label, styles.get(columnStyle, 0, bold));
+        }
+        if (entry.kind === 'group') {
+          return column.field in entry.values
+            ? valueCell(reference, entry.values[column.field], {} as R, column, styles, columnStyle, true, undefined)
+            : '';
+        }
+        return valueCell(reference, getCellValue(entry.row, column), entry.row, column, styles, columnStyle, false);
+      })
+      .join('');
+    const outline = entry.level > 0 ? ` outlineLevel="${Math.min(7, entry.level)}"` : '';
+    sheetRows.push(`<row r="${rowNumber}"${outline}>${cells}</row>`);
   }
 
   const cols = columns
@@ -220,10 +323,13 @@ export function buildXlsx<R extends GridValidRowModel>(
     : '';
   const lastReference = `${columnLetter(Math.max(0, columns.length - 1))}${Math.max(1, rowNumber)}`;
 
+  // Group rows sit above their children, so the outline's expand button belongs above too.
+  const outlineProperties = maxLevel > 0 ? '<sheetPr><outlinePr summaryBelow="0"/></sheetPr>' : '';
+  const format = maxLevel > 0 ? `<sheetFormatPr defaultRowHeight="15" outlineLevelRow="${Math.min(7, maxLevel)}"/>` : '';
   const sheet =
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
     '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
-    `<dimension ref="A1:${lastReference}"/>${view}<cols>${cols}</cols><sheetData>${sheetRows.join('')}</sheetData></worksheet>`;
+    `${outlineProperties}<dimension ref="A1:${lastReference}"/>${view}${format}<cols>${cols}</cols><sheetData>${sheetRows.join('')}</sheetData></worksheet>`;
 
   const workbook =
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
@@ -261,7 +367,7 @@ export function buildXlsx<R extends GridValidRowModel>(
         '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>' +
         '</Relationships>',
     },
-    { name: 'xl/styles.xml', content: STYLES_XML },
+    { name: 'xl/styles.xml', content: styles.toXml() },
     { name: 'xl/worksheets/sheet1.xml', content: sheet },
   ]);
 }

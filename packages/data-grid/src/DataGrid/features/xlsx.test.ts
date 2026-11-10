@@ -1,31 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { GridColDef } from '../DataGrid.types';
 import { buildXlsx, columnLetter, crc32, toExcelSerial, zipStore } from './xlsx';
-
-const decoder = new TextDecoder();
-
-/** Reads a stored zip archive back into a name to text map, checking each entry's CRC. */
-function unzip(bytes: Uint8Array): Record<string, string> {
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const files: Record<string, string> = {};
-  let offset = 0;
-  while (view.getUint32(offset, true) === 0x04034b50) {
-    const crc = view.getUint32(offset + 14, true);
-    const size = view.getUint32(offset + 18, true);
-    const nameLength = view.getUint16(offset + 26, true);
-    const name = decoder.decode(bytes.subarray(offset + 30, offset + 30 + nameLength));
-    const data = bytes.subarray(offset + 30 + nameLength, offset + 30 + nameLength + size);
-    expect(crc32(data)).toBe(crc);
-    files[name] = decoder.decode(data);
-    offset += 30 + nameLength + size;
-  }
-  // What follows the local entries must be a central directory and an end record that agree on the entry count.
-  const end = bytes.length - 22;
-  expect(view.getUint32(end, true)).toBe(0x06054b50);
-  expect(view.getUint16(end + 10, true)).toBe(Object.keys(files).length);
-  expect(view.getUint32(offset, true)).toBe(0x02014b50);
-  return files;
-}
+import { unzip } from './unzip.testutil';
 
 type Row = { id: number; name: string; qty: number; paid: boolean; joined: Date; team: string };
 
@@ -125,5 +101,44 @@ describe('buildXlsx', () => {
   it('writes a valid empty sheet', () => {
     const files = unzip(buildXlsx([], columns));
     expect(files['xl/worksheets/sheet1.xml']).toContain('<dimension ref="A1:E1"/>');
+  });
+});
+
+describe('styles and outline', () => {
+  const rows: Row[] = [{ id: 1, name: 'Ada', qty: 3, paid: true, joined: new Date(2024, 0, 2), team: 'r' }];
+
+  it('writes column styles with their number format, font, fill and alignment', () => {
+    const files = unzip(
+      buildXlsx(rows, columns, {
+        columnsStyles: {
+          qty: { numFmt: '#,##0.00', font: { bold: true, color: { argb: 'FFFF0000' } }, fill: { fgColor: { argb: '00FF00' } }, alignment: { horizontal: 'center' } },
+        },
+      }),
+    );
+    const styles = files['xl/styles.xml'] as string;
+    expect(styles).toContain('<numFmt numFmtId="164" formatCode="#,##0.00"/>');
+    expect(styles).toContain('<color rgb="FFFF0000"/>');
+    expect(styles).toContain('<fgColor rgb="FF00FF00"/>');
+    expect(styles).toContain('<alignment horizontal="center"/>');
+    const sheet = files['xl/worksheets/sheet1.xml'] as string;
+    const qtyCell = sheet.match(/<c r="B2" s="(\d+)"><v>3<\/v><\/c>/);
+    expect(qtyCell).not.toBeNull();
+    const xfs = (styles.match(/<cellXfs[^>]*>(.*)<\/cellXfs>/)?.[1] ?? '').match(/<xf [^>]*?(\/>|>.*?<\/xf>)/g) ?? [];
+    expect(xfs[Number(qtyCell?.[1])]).toContain('numFmtId="164"');
+  });
+
+  it('nests entries in outline levels with bold group rows', () => {
+    const sheet = unzip(
+      buildXlsx([], columns, {
+        entries: [
+          { kind: 'group', label: 'Red', level: 0, values: { qty: 3 } },
+          { kind: 'row', row: rows[0] as Row, level: 1, label: '' },
+        ],
+      }),
+    )['xl/worksheets/sheet1.xml'] as string;
+    expect(sheet).toContain('<outlinePr summaryBelow="0"/>');
+    expect(sheet).toContain('outlineLevelRow="1"');
+    expect(sheet).toMatch(/<row r="2"><c r="A2" t="inlineStr" s="\d+"><is><t xml:space="preserve">Red<\/t>/);
+    expect(sheet).toContain('<row r="3" outlineLevel="1">');
   });
 });

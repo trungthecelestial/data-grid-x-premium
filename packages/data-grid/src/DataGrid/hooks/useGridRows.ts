@@ -1,6 +1,8 @@
 import { useMemo } from 'react';
 import type {
   GridAggregationModel,
+  GridAggregationPosition,
+  GridGroupNode,
   GridColDef,
   GridFilterModel,
   GridRowId,
@@ -8,14 +10,14 @@ import type {
   GridValidRowModel,
 } from '../DataGrid.types';
 import { computeAggregates, type GridAggregationFunctions } from '../features/aggregation';
-import { getFormattedValue } from '../features/columns';
+import { getCellValue, getFormattedValue } from '../features/columns';
 import { getFilterPredicate } from '../features/filtering';
 import { getRowComparator } from '../features/sorting';
 import {
   buildFlatNodes,
   buildGroupedTree,
   buildPathTree,
-  collectRows,
+  collectLeafRows,
   NO_VALUE_LABEL,
   flattenTree,
   pruneTree,
@@ -48,18 +50,43 @@ export interface UseGridRowsParams<R extends GridValidRowModel> {
   /** Rows generated for a group, which are left out of `filteredRows`. */
   isGroupRow?: (row: R) => boolean;
   isPlaceholderRow?: (row: R) => boolean;
+  ignoreDiacritics?: boolean;
+  /** Tree data: filter and sort only the top level. */
+  disableChildrenFiltering?: boolean;
+  disableChildrenSorting?: boolean;
+  aggregationRowsScope?: 'filtered' | 'all';
+  getAggregationPosition?: (node: GridGroupNode) => GridAggregationPosition;
+  isGroupExpandedByDefault?: (node: GridGroupNode) => boolean;
 }
+
+export const ROOT_GROUP_ID = '__root_group__';
+
+export function toGroupNode<R extends GridValidRowModel>(node: GridTreeNode<R>): GridGroupNode {
+  return {
+    id: node.id,
+    depth: node.depth,
+    groupingField: node.groupField ?? null,
+    groupingKey: node.label,
+    childrenCount: node.rowCount - (node.row ? 1 : 0),
+  };
+}
+
+const defaultAggregationPosition = (node: GridGroupNode): GridAggregationPosition => (node.depth === -1 ? 'footer' : 'inline');
 
 export interface UseGridRowsResult<R extends GridValidRowModel> {
   /** Nodes on the current page, in display order, with expanded descendants included. */
   pageNodes: GridTreeNode<R>[];
   /** Top level nodes after filtering and sorting, before pagination. */
   roots: GridTreeNode<R>[];
+  /** Top level nodes before filtering. Sorted only when no filter applies. */
+  allRoots: GridTreeNode<R>[];
   rootCount: number;
   page: number;
   /** Every data row that passes the filters, in display order with all groups expanded. */
   filteredRows: R[];
   nodeAggregates: ReadonlyMap<GridRowId, Record<string, unknown>>;
+  /** Where each group on the page shows its aggregates. Groups without an entry show none. */
+  aggregationPositions: ReadonlyMap<GridRowId, 'inline' | 'footer'>;
   footerAggregates: Record<string, unknown> | null;
   isExpanded: (node: GridTreeNode<R>) => boolean;
   isGroup: boolean;
@@ -88,32 +115,45 @@ export function useGridRows<R extends GridValidRowModel>(params: UseGridRowsPara
     aggregationFunctions,
     isGroupRow,
     isPlaceholderRow,
+    ignoreDiacritics = false,
+    disableChildrenFiltering = false,
+    disableChildrenSorting = false,
+    aggregationRowsScope = 'filtered',
+    getAggregationPosition = defaultAggregationPosition,
+    isGroupExpandedByDefault,
   } = params;
 
   const isGroup = (treeData && Boolean(getTreeDataPath)) || rowGroupingModel.length > 0;
 
-  const roots = useMemo(() => {
+  const isPathTree = treeData && Boolean(getTreeDataPath);
+
+  const { roots, unfilteredRoots } = useMemo(() => {
     const predicate =
-      filterMode === 'client' ? getFilterPredicate(filterModel, columnsByField, quickFilterColumns) : null;
+      filterMode === 'client' ? getFilterPredicate(filterModel, columnsByField, quickFilterColumns, { ignoreDiacritics }) : null;
     const comparator = sortingMode === 'client' ? getRowComparator(sortModel, columnsByField) : null;
 
     if (!isGroup) {
       const filtered = predicate ? rows.filter(predicate) : [...rows];
-      return buildFlatNodes(comparator ? filtered.sort(comparator) : filtered, getRowId, isPlaceholderRow);
+      return { roots: buildFlatNodes(comparator ? filtered.sort(comparator) : filtered, getRowId, isPlaceholderRow), unfilteredRoots: null };
     }
 
-    let tree =
+    const tree =
       treeData && getTreeDataPath
         ? buildPathTree(rows, getRowId, getTreeDataPath)
         : buildGroupedTree(rows, getRowId, rowGroupingModel, (row, field) => {
             const column = columnsByField.get(field);
-            const label = column ? getFormattedValue(row, column) : String(row[field] ?? '');
+            const label = column?.groupingValueGetter
+              ? String(column.groupingValueGetter(getCellValue(row, column), row) ?? '')
+              : column
+                ? getFormattedValue(row, column)
+                : String(row[field] ?? '');
             return label === '' ? NO_VALUE_LABEL : label;
           });
-    if (predicate) {
-      tree = pruneTree(tree, predicate);
-    }
-    return sortTree(tree, comparator);
+    const pruned = predicate ? pruneTree(tree, predicate, isPathTree && disableChildrenFiltering) : tree;
+    return {
+      roots: sortTree(pruned, comparator, isPathTree && disableChildrenSorting),
+      unfilteredRoots: predicate ? tree : null,
+    };
   }, [
     rows,
     getRowId,
@@ -128,12 +168,19 @@ export function useGridRows<R extends GridValidRowModel>(params: UseGridRowsPara
     getTreeDataPath,
     rowGroupingModel,
     isPlaceholderRow,
+    ignoreDiacritics,
+    isPathTree,
+    disableChildrenFiltering,
+    disableChildrenSorting,
   ]);
 
   const isExpanded = useMemo(
     () => (node: GridTreeNode<R>) =>
-      expansion.get(node.id) ?? (defaultExpansionDepth === -1 || node.depth < defaultExpansionDepth),
-    [expansion, defaultExpansionDepth],
+      expansion.get(node.id) ??
+      (isGroupExpandedByDefault
+        ? isGroupExpandedByDefault(toGroupNode(node))
+        : defaultExpansionDepth === -1 || node.depth < defaultExpansionDepth),
+    [expansion, defaultExpansionDepth, isGroupExpandedByDefault],
   );
 
   // A page size of -1 (or any value below 1) is the "All" option: one page with every row.
@@ -154,30 +201,64 @@ export function useGridRows<R extends GridValidRowModel>(params: UseGridRowsPara
 
   const hasAggregation = Object.keys(aggregationModel).length > 0;
 
-  const nodeAggregates = useMemo(() => {
-    const result = new Map<GridRowId, Record<string, unknown>>();
-    if (hasAggregation) {
-      for (const node of pageNodes) {
-        if (node.children.length > 0) {
-          result.set(node.id, computeAggregates(collectRows(node), aggregationModel, columnsByField, aggregationFunctions, node.id));
-        }
+  // With the 'all' scope a group aggregates the rows the filters hid too, so it reads them from the unfiltered tree.
+  const unfilteredById = useMemo(() => {
+    const index = new Map<GridRowId, GridTreeNode<R>>();
+    if (hasAggregation && aggregationRowsScope === 'all' && unfilteredRoots) {
+      for (const node of flattenTree(unfilteredRoots, () => true)) {
+        index.set(node.id, node);
       }
     }
-    return result;
-  }, [hasAggregation, pageNodes, aggregationModel, columnsByField, aggregationFunctions]);
+    return index;
+  }, [hasAggregation, aggregationRowsScope, unfilteredRoots]);
 
-  const footerAggregates = useMemo(
-    () => (hasAggregation ? computeAggregates(filteredRows, aggregationModel, columnsByField, aggregationFunctions) : null),
-    [hasAggregation, filteredRows, aggregationModel, columnsByField, aggregationFunctions],
-  );
+  const { nodeAggregates, aggregationPositions } = useMemo(() => {
+    const aggregates = new Map<GridRowId, Record<string, unknown>>();
+    const positions = new Map<GridRowId, 'inline' | 'footer'>();
+    if (hasAggregation) {
+      for (const node of pageNodes) {
+        if (node.children.length === 0) {
+          continue;
+        }
+        const position = getAggregationPosition(toGroupNode(node));
+        if (!position) {
+          continue;
+        }
+        positions.set(node.id, position);
+        const source = unfilteredById.get(node.id) ?? node;
+        // Like MUI X, a parent aggregates the leaves below it. Tree data parents with values of their own leave those out.
+        aggregates.set(node.id, computeAggregates(collectLeafRows(source), aggregationModel, columnsByField, aggregationFunctions, node.id));
+      }
+    }
+    return { nodeAggregates: aggregates, aggregationPositions: positions };
+  }, [hasAggregation, pageNodes, aggregationModel, columnsByField, aggregationFunctions, getAggregationPosition, unfilteredById]);
+
+  const footerAggregates = useMemo(() => {
+    if (!hasAggregation) {
+      return null;
+    }
+    const leaves = (nodes: readonly GridTreeNode<R>[]) => nodes.flatMap((node) => collectLeafRows(node));
+    const scopeRows = isPathTree
+      ? leaves(aggregationRowsScope === 'all' ? (unfilteredRoots ?? roots) : roots)
+      : aggregationRowsScope === 'all'
+        ? rows.filter((row) => !isGroupRow?.(row) && !isPlaceholderRow?.(row))
+        : filteredRows;
+    const root: GridGroupNode = { id: ROOT_GROUP_ID, depth: -1, groupingField: null, groupingKey: null, childrenCount: scopeRows.length };
+    if (!getAggregationPosition(root)) {
+      return null;
+    }
+    return computeAggregates(scopeRows, aggregationModel, columnsByField, aggregationFunctions);
+  }, [hasAggregation, isPathTree, roots, unfilteredRoots, aggregationRowsScope, rows, isGroupRow, isPlaceholderRow, filteredRows, getAggregationPosition, aggregationModel, columnsByField, aggregationFunctions]);
 
   return {
     pageNodes,
     roots,
+    allRoots: unfilteredRoots ?? roots,
     rootCount: roots.length,
     page: currentPage,
     filteredRows,
     nodeAggregates,
+    aggregationPositions,
     footerAggregates,
     isExpanded,
     isGroup,

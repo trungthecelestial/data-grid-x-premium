@@ -190,6 +190,13 @@ export interface GridColDef<R extends GridValidRowModel = GridValidRowModel> {
   colSpan?: number | ((value: any, row: R, column: GridColDef<R>) => number);
   /** Value compared between consecutive rows when `rowSpanning` is on. Defaults to the cell value. */
   rowSpanValueGetter?: (value: any, row: R) => unknown;
+  /** The value rows are grouped by when the column is in `rowGroupingModel`. Defaults to the cell value. */
+  groupingValueGetter?: (value: any, row: R) => unknown;
+  /**
+   * Writes a group's value into a row that is dragged into that group. Needed with `groupingValueGetter`.
+   * Without a getter, the grid copies the field from a row of the group.
+   */
+  groupingValueSetter?: (value: unknown, row: R) => R;
   /** Options of a `singleSelect` column. */
   valueOptions?: readonly (string | number | GridValueOption)[];
   valueGetter?: (value: any, row: R) => unknown;
@@ -298,9 +305,57 @@ export interface GridEventMap {
   rowEditStart: [params: { id: GridRowId }];
   rowEditStop: [params: { id: GridRowId; reason: GridEditStopReason }];
   rowsScrollEnd: [params: { visibleRowsCount: number; viewportPageSize: number }];
+  /** An undo step was applied. `rows` holds each changed row as it is now. */
+  undo: [params: GridHistoryEventParams];
+  redo: [params: GridHistoryEventParams];
 }
 
 export type GridEventName = keyof GridEventMap;
+
+export interface GridHistoryEventParams {
+  rows: { id: GridRowId; row: GridValidRowModel }[];
+}
+
+/** Undo and redo of cell edits, row edits and pasted cells. */
+export interface GridHistoryApi {
+  /** Reverts the latest change. Resolves to false when there is nothing to undo, or the rows changed since. */
+  undo: () => Promise<boolean>;
+  /** Applies the latest undone change again. */
+  redo: () => Promise<boolean>;
+  canUndo: () => boolean;
+  canRedo: () => boolean;
+  /** Empties both stacks. */
+  clear: () => void;
+}
+
+/** A group as `isGroupExpandedByDefault` and `getAggregationPosition` see it. The grand total is the root, with depth -1. */
+export interface GridGroupNode {
+  id: GridRowId;
+  /** -1 for the root, 0 for top level groups. */
+  depth: number;
+  /** The column a row grouping group groups by. `null` for tree data and the root. */
+  groupingField: string | null;
+  /** The group's value, or its path segment in tree data. `null` for the root. */
+  groupingKey: string | null;
+  /** Number of data rows below the group. */
+  childrenCount: number;
+}
+
+/** Where a group shows its aggregated values: on its own row, in a footer row under its children, or nowhere. */
+export type GridAggregationPosition = 'inline' | 'footer' | null;
+
+export type GridGroupingColDefOverride<R extends GridValidRowModel = GridValidRowModel> = Partial<GridColDef<R>> & {
+  /** Leaves out the `(count)` after a group's label. */
+  hideDescendantCount?: boolean;
+  /** Field whose value the grouping column shows on data rows, which otherwise leave it empty. */
+  leafField?: string;
+};
+
+/** The one column of the list view. It spans the grid's width and renders the whole row. */
+export interface GridListViewColDef<R extends GridValidRowModel = GridValidRowModel>
+  extends Omit<GridColDef<R>, 'renderCell' | 'width' | 'flex'> {
+  renderCell: (params: GridRenderCellParams<R>) => ReactNode;
+}
 
 export interface GridInitialState {
   sorting?: { sortModel?: GridSortModel };
@@ -345,6 +400,10 @@ export interface GridLocaleText {
   filterPanelLogicAnd: string;
   filterPanelLogicOr: string;
   filterPanelNoFilters: string;
+  filterPanelDeleteFilter: string;
+  filterPanelLogicOperator: string;
+  /** Example shown in the input of the "is any of" operator. */
+  filterPanelMultiValuePlaceholder: string;
   filterOperators: Record<string, string>;
   aggregationFunctions: Record<GridBuiltInAggregationFunction, string> & Record<string, string>;
   footerRowsSelected: (count: number) => string;
@@ -382,6 +441,12 @@ export interface GridLocaleText {
   pivotMoveDown: string;
   pivotRemove: string;
   pivotTotal: string;
+  /** Heading of the pivot panel's unused fields, which can be dragged into rows, columns or values. */
+  pivotFields: string;
+  toolbarUndo: string;
+  toolbarRedo: string;
+  /** Label of a group's aggregation footer row. */
+  groupFooterLabel: (groupLabel: string) => string;
 }
 
 export interface GridToolbarProps<R extends GridValidRowModel = GridValidRowModel> {
@@ -412,6 +477,13 @@ export interface GridToolbarProps<R extends GridValidRowModel = GridValidRowMode
   /** Opens the pivot panel under the given element. Omitted when pivoting is not available. */
   onOpenPivotPanel?: (anchor: HTMLElement) => void;
   pivotActive?: boolean;
+  /** Present when undo is available. */
+  onUndo?: () => void;
+  onRedo?: () => void;
+  canUndo?: boolean;
+  canRedo?: boolean;
+  /** Keeps the filter panel to one filter at a time. */
+  disableMultipleColumnsFiltering?: boolean;
 }
 
 export interface GridOverlayProps {
@@ -438,6 +510,8 @@ export interface GridFilterPanelSlotProps<R extends GridValidRowModel = GridVali
   filterModel: GridFilterModel;
   onFilterModelChange: (model: GridFilterModel) => void;
   localeText: GridLocaleText;
+  /** Hides "Add filter" once there is a filter. */
+  disableMultipleFilters?: boolean;
 }
 
 export interface GridColumnsPanelSlotProps<R extends GridValidRowModel = GridValidRowModel> {
@@ -501,11 +575,29 @@ export interface GridCsvExportOptions {
   includeHeaders?: boolean;
   /** Prepends a byte order mark so Excel reads the file as UTF-8. Defaults to false. */
   utf8WithBom?: boolean;
+  /** Prefixes text starting with `=`, `+`, `-`, `@`, tab or carriage return with `'`, so spreadsheets do not run it as a formula. Defaults to true. */
+  escapeFormulas?: boolean;
   /** Picks the rows to export. Defaults to every filtered row. */
   getRowsToExport?: (params: { apiRef: GridApi }) => GridRowId[];
 }
 
+/** A subset of the exceljs cell style, so styles written for MUI X carry over. Colors are ARGB (`FF1976D2`) or RGB hex. */
+export interface GridExcelCellStyle {
+  /** Excel number format, such as `'#,##0.00'` or `'yyyy-mm-dd'`. */
+  numFmt?: string;
+  font?: { bold?: boolean; italic?: boolean; underline?: boolean; size?: number; color?: { argb: string } };
+  fill?: { type?: 'pattern'; pattern?: 'solid'; fgColor?: { argb: string } };
+  alignment?: { horizontal?: 'left' | 'center' | 'right'; vertical?: 'top' | 'middle' | 'bottom'; wrapText?: boolean };
+}
+
 export interface GridExcelExportOptions {
+  /** Styles for the cells of each column, by field. */
+  columnsStyles?: Record<string, GridExcelCellStyle>;
+  /**
+   * With row grouping or tree data, writes the groups as rows of their own with their aggregates, and nests the rows below them
+   * in Excel outline levels that can be collapsed. Defaults to true.
+   */
+  includeRowGroups?: boolean;
   fileName?: string;
   /** Worksheet name. Defaults to `Sheet1`. */
   sheetName?: string;
@@ -664,10 +756,108 @@ export interface GridApi {
   exportState: () => GridInitialState;
   restoreState: (state: GridInitialState) => void;
   /** Listens to a grid event. Returns the function that stops listening. */
+  /** Undo and redo of edits and pastes. */
+  history: GridHistoryApi;
+
+  /** Opens the filter panel. With a field, adds a filter for that column when it has none. */
+  showFilterPanel: (field?: string) => void;
+  hideFilterPanel: () => void;
+  /** Opens the filter or the columns panel. */
+  showPreferences: (panel: 'filters' | 'columns') => void;
+  hidePreferences: () => void;
+  showColumnMenu: (field: string) => void;
+  hideColumnMenu: () => void;
+  toggleColumnMenu: (field: string) => void;
+  /** Adds a filter item, or replaces the one with the same `id`. */
+  upsertFilterItem: (item: GridFilterItem) => void;
+  upsertFilterItems: (items: GridFilterItem[]) => void;
+  /** Removes the filter item with the same `id`, or the same field when it has no id. */
+  deleteFilterItem: (item: GridFilterItem) => void;
+  setFilterLogicOperator: (operator: GridLogicOperator) => void;
+  /** Sorts by one column. `allowMultipleSorting` keeps the other sorted columns. A `null` direction removes the column from the sort. */
+  sortColumn: (field: string, direction: GridSortDirection, allowMultipleSorting?: boolean) => void;
+  /** Rows in sorted order, ignoring filters and pagination. */
+  getSortedRowIds: () => GridRowId[];
+  getSortedRows: () => GridValidRowModel[];
+  /** The id of the row at an index of the rows on the current page. */
+  getRowIdFromRowIndex: (index: number) => GridRowId | undefined;
+  setColumnVisibilityModel: (model: GridColumnVisibilityModel) => void;
+  /** Changes the value in an open editor, as if the user typed it. Resolves to false when the cell is not being edited. */
+  setEditCellValue: (params: { id: GridRowId; field: string; value: unknown }) => Promise<boolean>;
+  getCellMode: (id: GridRowId, field: string) => 'view' | 'edit';
+  getRowMode: (id: GridRowId) => 'view' | 'edit';
+  getRowParams: (id: GridRowId) => GridRowParams | null;
+  getCellParams: (id: GridRowId, field: string) => GridCellParams | null;
+  getColumnHeaderParams: (field: string) => GridColumnHeaderParams | null;
+  /** The node of a row or group in the row tree, or `null` for an unknown id. */
+  getRowNode: (id: GridRowId) => GridRowNode | null;
+  /** Ids of the data rows below a group. Filtering and sorting apply only when asked for. */
+  getRowGroupChildren: (params: { groupId: GridRowId; applyFiltering?: boolean; applySorting?: boolean }) => GridRowId[];
+  /** Adds a field to the row grouping model, at `index` or at the end. */
+  addRowGroupingCriteria: (field: string, index?: number) => void;
+  removeRowGroupingCriteria: (field: string) => void;
+  setRowGroupingCriteriaIndex: (field: string, index: number) => void;
+  /** Moves the keyboard focus to a column header. */
+  setColumnHeaderFocus: (field: string) => void;
+  /** Replaces the rows until the `rows` prop changes. Edits and row order made since are dropped. */
+  setRows: (rows: GridValidRowModel[]) => void;
+  /** Changes columns by field, and adds the ones with a new field, until the `columns` prop changes. */
+  updateColumns: (columns: GridColDef<any>[]) => void;
+  /** Selects the rows between two rows of the current page, both included. */
+  selectRowRange: (range: { startId: GridRowId; endId: GridRowId }, isSelected?: boolean, resetSelection?: boolean) => void;
+  /** Selects the rectangle of cells between two cells of the current page. Needs `cellSelection`. */
+  selectCellRange: (start: { id: GridRowId; field: string }, end: { id: GridRowId; field: string }, keepOtherSelected?: boolean) => void;
+  setExpandedDetailPanels: (ids: GridRowId[]) => void;
+  isColumnPinned: (field: string) => 'left' | 'right' | false;
+  /** Distance in px from the start of the row to the start of the column. */
+  getColumnPosition: (field: string) => number;
+  getRootDimensions: () => GridDimensions;
+  getLocaleText: <K extends keyof GridLocaleText>(key: K) => GridLocaleText[K];
+  getRowElement: (id: GridRowId) => HTMLElement | null;
+  getCellElement: (id: GridRowId, field: string) => HTMLElement | null;
+  getColumnHeaderElement: (field: string) => HTMLElement | null;
+  /** The value a column shows for a row, through its `valueGetter`. */
+  getRowValue: (row: GridValidRowModel, column: GridColDef<any>) => unknown;
+  /** The text a column shows for a row, through its `valueFormatter`. */
+  getRowFormattedValue: (row: GridValidRowModel, column: GridColDef<any>) => string;
+  isRowSelectable: (id: GridRowId) => boolean;
+  /** Calls the matching `on*` prop and every `subscribeEvent` listener, as if the grid fired the event. */
+  publishEvent: <E extends GridEventName>(event: E, ...args: GridEventMap[E]) => void;
+  getAggregationModel: () => GridAggregationModel;
+  getRowGroupingModel: () => string[];
+  getColumnVisibilityModel: () => GridColumnVisibilityModel;
+  /** Expands or collapses every group. */
+  setAllRowChildrenExpansion: (isExpanded: boolean) => void;
   subscribeEvent: <E extends GridEventName>(event: E, handler: (...args: GridEventMap[E]) => void) => () => void;
 }
 
 export type GridApiRef = MutableRefObject<GridApi>;
+
+export interface GridDimensions {
+  /** Size of the scrolling area, without its scrollbars. */
+  viewportWidth: number;
+  viewportHeight: number;
+  /** Width of all columns and height of all rows on the page. */
+  contentWidth: number;
+  contentHeight: number;
+  rowHeight: number;
+  columnHeaderHeight: number;
+}
+
+/** A row or a group in the row tree. */
+export interface GridRowNode {
+  id: GridRowId;
+  type: 'leaf' | 'group';
+  depth: number;
+  parent: GridRowId | null;
+  /** Ids of the nodes directly below. */
+  children: GridRowId[];
+  groupingField: string | null;
+  groupingKey: string | null;
+  childrenExpanded: boolean;
+  /** Generated by the grid, without a row of the data. */
+  isAutoGenerated: boolean;
+}
 
 export interface GridDataSourceGetRowsParams {
   sortModel: GridSortModel;
@@ -682,6 +872,20 @@ export interface GridDataSourceGetRowsParams {
   /** Columns the rows are grouped by. With `groupKeys.length < groupFields.length` the response holds group rows. */
   groupFields: string[];
   aggregationModel: GridAggregationModel;
+  /**
+   * Set while a pivot table shows, with a `dataSource` that has `supportsPivoting`.
+   * Group by `pivotModel.rows` (they are also in `groupFields`), return the values of each column path in the fields that
+   * `getPivotColumnField` names, and describe the column paths in `pivotColumns`.
+   */
+  pivotModel?: GridPivotModel;
+}
+
+/** One value of a pivot column field, with the values of the next column field below it. */
+export interface GridPivotColumnNode {
+  key: string;
+  /** Header text. Defaults to `key`. */
+  label?: string;
+  children?: GridPivotColumnNode[];
 }
 
 export interface GridDataSourceGetRowsResult<R extends GridValidRowModel = GridValidRowModel> {
@@ -692,6 +896,8 @@ export interface GridDataSourceGetRowsResult<R extends GridValidRowModel = GridV
   pageInfo?: { hasNextPage?: boolean };
   /** A row holding the grand totals, read through `getAggregatedValue`. */
   aggregateRow?: R;
+  /** The values of the pivot column fields, as a tree in `pivotModel.columns` order. Needed when pivoting by columns. */
+  pivotColumns?: GridPivotColumnNode[];
 }
 
 export interface GridDataSourceCache {
@@ -713,6 +919,13 @@ export interface GridDataSource<R extends GridValidRowModel = GridValidRowModel>
   getAggregatedValue?: (row: R, field: string) => unknown;
   /** Saves an edited row. Return the stored row, or nothing to keep the edit as it is. Reject to refuse the edit. */
   updateRow?: (params: { rowId: GridRowId; updatedRow: R; previousRow: R }) => Promise<R | void>;
+  /** Turns on the pivot table for this data source. `getRows` then receives `pivotModel` and does the pivoting. */
+  supportsPivoting?: boolean;
+  /**
+   * The row field that holds the value of `field` aggregated with `aggFunc` under one column path.
+   * Defaults to the path and the field joined with `>->`, as in `2024>->North>->salary`.
+   */
+  getPivotColumnField?: (params: { columnPath: string[]; field: string; aggFunc: GridAggregationFunction }) => string;
 }
 
 export interface DataGridProps<R extends GridValidRowModel = GridValidRowModel> {
@@ -760,10 +973,18 @@ export interface DataGridProps<R extends GridValidRowModel = GridValidRowModel> 
   sortingMode?: 'client' | 'server';
   sortingOrder?: readonly GridSortDirection[];
   disableMultipleColumnsSorting?: boolean;
+  /** `'withModifierKey'` (default) adds a column to the sort with Shift or Ctrl/Cmd+click. `'always'` adds it on any click. */
+  multipleColumnsSortingMode?: 'withModifierKey' | 'always';
 
   filterModel?: GridFilterModel;
   onFilterModelChange?: (model: GridFilterModel) => void;
   filterMode?: 'client' | 'server';
+  /** Waits this long after the last filter change before filtering the rows. Defaults to 0. */
+  filterDebounceMs?: number;
+  /** Matches text regardless of accents, so `cafe` finds `Café`. */
+  ignoreDiacritics?: boolean;
+  /** Allows one filter at a time. A new filter replaces the current one. */
+  disableMultipleColumnsFiltering?: boolean;
 
   /** Defaults to true. */
   pagination?: boolean;
@@ -774,6 +995,8 @@ export interface DataGridProps<R extends GridValidRowModel = GridValidRowModel> 
   rowCount?: number;
   /** Page sizes to offer. Use `{ value: -1, label: 'All' }` for an option that shows every row. */
   pageSizeOptions?: readonly (number | GridPageSizeOption)[];
+  /** Sets the page size to the number of rows that fit the grid's height, and hides the page size choice. */
+  autoPageSize?: boolean;
   hideFooter?: boolean;
 
   checkboxSelection?: boolean;
@@ -813,12 +1036,16 @@ export interface DataGridProps<R extends GridValidRowModel = GridValidRowModel> 
   columnBuffer?: number;
   /** Shows a filter row under the column headers. Each cell edits the filter item of its column. */
   headerFilters?: boolean;
+  /** Height of the header filter row. Defaults to the column header height. */
+  headerFilterHeight?: number;
 
   /**
    * Adds a drag handle column so rows can be dragged into a new position, or moved with Alt+Arrow keys from the handle.
-   * Reordering is off while sorting, filtering or grouping is active, since the rows then show in another order.
+   * Reordering is off while sorting or filtering is active, since the rows then show in another order. With tree data or row grouping a row moves among the rows of its own parent.
    */
   rowReordering?: boolean;
+  /** Turns off the drag handle of single rows. */
+  isRowReorderable?: (params: { id: GridRowId; row: R }) => boolean;
 
   /**
    * Lets the user select cells: click, Shift+click or drag for a range, Ctrl/Cmd+click to toggle one cell, Shift+Arrow to extend.
@@ -829,6 +1056,15 @@ export interface DataGridProps<R extends GridValidRowModel = GridValidRowModel> 
   onCellSelectionModelChange?: (model: GridCellSelectionModel) => void;
   /** Turns off pasting tab separated text into editable cells with Ctrl/Cmd+V. */
   disableClipboardPaste?: boolean;
+  /** Splits pasted text into rows and cells. Return `null` to ignore the paste. Defaults to a tab separated parser that understands quoted cells. */
+  splitClipboardPastedText?: (text: string, delimiter: string) => string[][] | null;
+  /** Separates the cells of copied rows, and of pasted text with the default parser. Defaults to a tab. */
+  clipboardCopyCellDelimiter?: string;
+  /**
+   * Number of edits, row edits and pastes that Ctrl/Cmd+Z can undo. Ctrl/Cmd+Shift+Z and Ctrl+Y redo.
+   * Undoing calls `processRowUpdate` with the earlier row. `0` turns history off. Defaults to 30.
+   */
+  historyStackSize?: number;
   /** Called with the text the user pasted, before it is applied. */
   onClipboardPaste?: (text: string) => void;
   /** Called after a row moved. Indexes count every row in the current order, not only the rows on the page. */
@@ -860,9 +1096,22 @@ export interface DataGridProps<R extends GridValidRowModel = GridValidRowModel> 
   /** Called once per row when it is expanded and `getChildrenCount` says children are missing. Add them to `rows` when they arrive. */
   onFetchChildren?: (params: { id: GridRowId; row: R }) => void | Promise<void>;
   getTreeDataPath?: (row: R) => string[];
+  /** Writes a new path into a row, so tree rows can be dragged to another parent. The row's descendants get theirs too. */
+  setTreeDataPath?: (path: string[], row: R) => R;
   /** Expansion depth of groups on first render. `-1` expands everything. Defaults to 0. */
   defaultGroupingExpansionDepth?: number;
-  groupingColDef?: Partial<GridColDef<R>>;
+  /** Decides whether a group starts expanded. Takes over from `defaultGroupingExpansionDepth`. */
+  isGroupExpandedByDefault?: (node: GridGroupNode) => boolean;
+  /** Overrides for the grouping column. The function form receives the field of the column in `'multiple'` mode. */
+  groupingColDef?:
+    | GridGroupingColDefOverride<R>
+    | ((params: { groupingField: string | null; fields: readonly string[] }) => GridGroupingColDefOverride<R> | undefined);
+  /** `'single'` (default) shows every row grouping level in one column, `'multiple'` gives each grouped field its own column. */
+  rowGroupingColumnMode?: 'single' | 'multiple';
+  /** Tree data: filters only the top level rows, and keeps every child of a matching row. */
+  disableChildrenFiltering?: boolean;
+  /** Tree data: sorts only the top level rows, and keeps children in their order. */
+  disableChildrenSorting?: boolean;
   rowGroupingModel?: string[];
   onRowGroupingModelChange?: (model: string[]) => void;
   /** Turns off grouping by a column from the column menu. */
@@ -873,6 +1122,17 @@ export interface DataGridProps<R extends GridValidRowModel = GridValidRowModel> 
   disableAggregation?: boolean;
   /** Functions the grid can aggregate with, by key. Replaces the built-in ones, so spread `GRID_AGGREGATION_FUNCTIONS` to keep them. */
   aggregationFunctions?: Readonly<Record<string, GridAggregationFunctionDef>>;
+  /** Aggregates the rows that pass the filters (`'filtered'`, the default) or every row (`'all'`). */
+  aggregationRowsScope?: 'filtered' | 'all';
+  /**
+   * Where each group shows its aggregates. The root (depth -1) is the grand total in the footer: anything but `null` shows it.
+   * Defaults to `'footer'` for the root and `'inline'` for groups.
+   */
+  getAggregationPosition?: (node: GridGroupNode) => GridAggregationPosition;
+
+  /** Shows each row as one full-width cell rendered by `listViewColumn`, without column headers. Suits narrow screens. */
+  listView?: boolean;
+  listViewColumn?: GridListViewColDef<R>;
 
   /**
    * Shows a pivot table of the rows according to `pivotModel`.
@@ -886,10 +1146,20 @@ export interface DataGridProps<R extends GridValidRowModel = GridValidRowModel> 
   onPivotModelChange?: (model: GridPivotModel) => void;
   /** Removes the pivot button from the toolbar and ignores `pivotActive`. */
   disablePivoting?: boolean;
+  /**
+   * Extra fields a column offers to the pivot panel, such as the year of a date.
+   * Defaults to a year and a quarter field for date columns. Return `undefined` or `[]` for none.
+   */
+  getPivotDerivedColumns?: (column: GridColDef<R>) => GridColDef<R>[] | undefined;
+  /** Overrides for the generated value columns of the pivot table. */
+  pivotingColDef?:
+    | Partial<GridColDef<R>>
+    | ((params: { field: string; aggFunc: GridAggregationFunction; columnGroupPath: string[] }) => Partial<GridColDef<R>> | undefined);
 
   getDetailPanelContent?: (params: { id: GridRowId; row: R }) => ReactNode;
   /** Height of an open detail panel in px. Defaults to 200. */
-  getDetailPanelHeight?: (params: { id: GridRowId; row: R }) => number;
+  /** `'auto'` sizes the panel to its content. */
+  getDetailPanelHeight?: (params: { id: GridRowId; row: R }) => number | 'auto';
   detailPanelExpandedRowIds?: readonly GridRowId[];
   onDetailPanelExpandedRowIdsChange?: (ids: GridRowId[]) => void;
 
@@ -949,6 +1219,10 @@ export interface DataGridProps<R extends GridValidRowModel = GridValidRowModel> 
   onColumnAutosize?: (widths: Record<string, number>) => void;
   /** Turns off double-click on a column border to fit the column to its content. */
   disableAutosize?: boolean;
+  /** Fits the columns to their content once the grid mounts. */
+  autosizeOnMount?: boolean;
+  /** Options for `autosizeOnMount` and for double-clicking a column border. */
+  autosizeOptions?: GridAutosizeOptions;
   /** Options applied to the toolbar's CSV export. */
   csvOptions?: Omit<GridCsvExportOptions, 'getRowsToExport'>;
   /** Options applied to the toolbar's Excel export. */
