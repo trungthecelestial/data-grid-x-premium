@@ -3,6 +3,8 @@ export { GridToolbar } from './components/GridToolbar';
 export { GridColumnsPanel } from './components/GridColumnsPanel';
 export { GridColumnMenu } from './components/GridColumnMenu';
 export { GridPivotPanel } from './components/GridPivotPanel';
+export { GridChart, type GridChartProps } from './components/GridChart';
+export { GridChartsPanel } from './components/GridChartsPanel';
 export { GridFilterPanel } from './components/GridFilterPanel';
 export { DEFAULT_LOCALE_TEXT } from './localeText';
 export { getDefaultFilterOperators } from './features/filtering';

@@ -106,6 +106,31 @@ With `rowReordering`, tree data and grouped rows can be dragged, or moved with A
 
 From the keyboard, on a row's drag handle: Alt+Up/Down at the start or end of a group moves a grouped row into the group above or below. Alt+Shift+Right makes a tree row the last child of the row above it, and Alt+Shift+Left moves it out of its parent, right after the parent.
 
+## Charts
+
+Set `chartsIntegration` to add a Charts button to the toolbar. Its panel plots the rows as the grid shows them: after the filters and sorting, as groups with their aggregates when rows are grouped, or as the pivot table when pivoting.
+
+```tsx
+<DataGrid
+  rows={rows}
+  columns={columns}
+  showToolbar
+  chartsIntegration
+  initialState={{ charts: { model: { type: 'column', categoryField: 'team', series: ['salary'] } } }}
+/>
+```
+
+| Part | Detail |
+| --- | --- |
+| Types | `column`, `bar`, `line`, `area`, `pie` and `scatter`. Scatter plots the first series against the second |
+| Series | Number columns. Pick them in the panel or in `series` |
+| Categories | `categoryField`, or the first column that is not a number. Rows with the same category add up. With row grouping, each group is a category and its aggregate is the value, falling back to the sum of its rows |
+| Limits | The first 100 categories are drawn |
+| Control | `chartsModel` and `onChartsModelChange`, `apiRef.current.getChartsModel()`, `setChartsModel()` and `getChartData()`. The model is part of `exportState()` and `restoreState()` |
+| Slot | `slots.chartsPanel` replaces the panel. `GridChart` is exported to draw a `GridChartData` anywhere |
+
+The charts are SVG drawn by the grid in the theme colors, so no chart library is needed. The panel can download the chart as an SVG file.
+
 ## Pivoting extras
 
 The pivot panel lists the unused fields at the top. Drag them into rows, columns or values, between those areas, or back to the list to remove them. The buttons still work from the keyboard. Date columns offer a year and a quarter field. Pass `getPivotDerivedColumns` to offer others, and `pivotingColDef` to change the generated value columns.

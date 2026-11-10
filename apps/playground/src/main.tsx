@@ -205,6 +205,7 @@ function RowGrouping() {
       pagination={false}
       height={480}
       showToolbar
+      chartsIntegration
     />
   );
 }
@@ -238,7 +239,7 @@ function UndoRedo() {
       <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
         Edit or paste into cells, then undo with Ctrl/Cmd+Z or the toolbar, and redo with Ctrl/Cmd+Shift+Z.
       </Typography>
-      <DataGrid rows={employees.slice(0, 50)} columns={columns} cellSelection showToolbar ignoreDiacritics height={480} />
+      <DataGrid rows={employees.slice(0, 50)} columns={columns} cellSelection showToolbar chartsIntegration ignoreDiacritics height={480} />
     </Box>
   );
 }

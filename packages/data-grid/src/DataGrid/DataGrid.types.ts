@@ -357,10 +357,11 @@ export interface GridState {
   aggregation: { model: GridAggregationModel };
   rowGrouping: { model: string[] };
   pivoting: { active: boolean; model: GridPivotModel };
+  charts: { model: GridChartsModel };
   detailPanel: { expandedRowIds: GridRowId[] };
   editing: { id: GridRowId; field: string | null; values: Record<string, unknown> } | null;
   focus: { cell: { id: GridRowId; field: string } | null; columnHeader: { field: string } | null };
-  preferencePanel: { open: boolean; openedPanelValue: 'filters' | 'columns' | 'pivot' | null };
+  preferencePanel: { open: boolean; openedPanelValue: 'filters' | 'columns' | 'pivot' | 'charts' | null };
   columnMenu: { open: boolean; field: string | null };
 }
 
@@ -409,6 +410,23 @@ export interface GridListViewColDef<R extends GridValidRowModel = GridValidRowMo
   renderCell: (params: GridRenderCellParams<R>) => ReactNode;
 }
 
+export type GridChartType = 'column' | 'bar' | 'line' | 'area' | 'pie' | 'scatter';
+
+export interface GridChartsModel {
+  type: GridChartType;
+  /** The column whose values label the categories. Defaults to the first column that is not a number, or the group name when rows are grouped. */
+  categoryField?: string;
+  /** Number columns to draw, one series each. Scatter plots the first against the second. */
+  series: string[];
+}
+
+export interface GridChartData {
+  categories: string[];
+  series: { field: string; label: string; values: (number | null)[] }[];
+  /** True when more categories existed than the chart draws. */
+  truncated: boolean;
+}
+
 export interface GridInitialState {
   sorting?: { sortModel?: GridSortModel };
   filter?: { filterModel?: GridFilterModel };
@@ -424,6 +442,7 @@ export interface GridInitialState {
   aggregation?: { model?: GridAggregationModel };
   rowGrouping?: { model?: string[] };
   pivoting?: { enabled?: boolean; model?: GridPivotModel };
+  charts?: { model?: GridChartsModel };
 }
 
 export interface GridLocaleText {
@@ -484,6 +503,18 @@ export interface GridLocaleText {
   columnMenuUnpin: string;
   headerFilterOperator: string;
   toolbarPivot: string;
+  toolbarCharts: string;
+  chartsPanelTitle: string;
+  chartsType: string;
+  chartsCategory: string;
+  chartsSeries: string;
+  chartsNoSeries: string;
+  chartsNoData: string;
+  chartsTruncated: (count: number) => string;
+  chartsDownload: string;
+  chartsAutoCategory: string;
+  chartsScatterNeedsTwo: string;
+  chartTypeLabel: (type: GridChartType) => string;
   pivotPanelActive: string;
   pivotRows: string;
   pivotColumns: string;
@@ -529,6 +560,8 @@ export interface GridToolbarProps<R extends GridValidRowModel = GridValidRowMode
   /** Opens the pivot panel under the given element. Omitted when pivoting is not available. */
   onOpenPivotPanel?: (anchor: HTMLElement) => void;
   pivotActive?: boolean;
+  /** Opens the charts panel under the given element. Omitted when charts are not available. */
+  onOpenChartsPanel?: (anchor: HTMLElement) => void;
   /** Present when undo is available. */
   onUndo?: () => void;
   onRedo?: () => void;
@@ -585,6 +618,19 @@ export interface GridPivotPanelSlotProps<R extends GridValidRowModel = GridValid
   localeText: GridLocaleText;
 }
 
+export interface GridChartsPanelSlotProps<R extends GridValidRowModel = GridValidRowModel> {
+  /** The columns a series can draw. */
+  seriesColumns: readonly GridColDef<R>[];
+  /** The columns that can label categories. */
+  categoryColumns: readonly GridColDef<R>[];
+  /** Set when the rows are grouped: categories are the groups, so `categoryField` has no effect. */
+  grouped: boolean;
+  model: GridChartsModel;
+  onModelChange: (model: GridChartsModel) => void;
+  data: GridChartData;
+  localeText: GridLocaleText;
+}
+
 export interface GridSlots {
   toolbar?: ComponentType<GridToolbarProps<any>>;
   /** Replaces the column header menu. Receives the props of the built-in `GridColumnMenu`. */
@@ -598,6 +644,7 @@ export interface GridSlots {
   filterPanel?: ComponentType<GridFilterPanelSlotProps<any>>;
   columnsPanel?: ComponentType<GridColumnsPanelSlotProps<any>>;
   pivotPanel?: ComponentType<GridPivotPanelSlotProps<any>>;
+  chartsPanel?: ComponentType<GridChartsPanelSlotProps<any>>;
 }
 
 /** Extra props merged into the props each slot receives. */
@@ -611,6 +658,7 @@ export interface GridSlotProps {
   filterPanel?: Record<string, unknown>;
   columnsPanel?: Record<string, unknown>;
   pivotPanel?: Record<string, unknown>;
+  chartsPanel?: Record<string, unknown>;
 }
 
 export interface GridEditStopParams {
@@ -787,6 +835,11 @@ export interface GridApi {
   getPivotModel: () => GridPivotModel;
   /** Does nothing where pivoting is not available. */
   setPivotModel: (model: GridPivotModel) => void;
+  getChartsModel: () => GridChartsModel;
+  /** Does nothing unless `chartsIntegration` is on. */
+  setChartsModel: (model: GridChartsModel) => void;
+  /** The data the chart draws for the current rows and model. */
+  getChartData: () => GridChartData;
   toggleDetailPanel: (id: GridRowId) => void;
   getExpandedDetailPanels: () => GridRowId[];
   setRowChildrenExpansion: (id: GridRowId, isExpanded: boolean) => void;
@@ -1203,6 +1256,13 @@ export interface DataGridProps<R extends GridValidRowModel = GridValidRowModel> 
   onPivotActiveChange?: (active: boolean) => void;
   pivotModel?: GridPivotModel;
   onPivotModelChange?: (model: GridPivotModel) => void;
+  /**
+   * Adds a Charts button to the toolbar. Its panel plots the rows as they show: filtered, sorted, grouped with their aggregates, or pivoted.
+   * Charts are drawn as SVG by the grid, with no chart library needed.
+   */
+  chartsIntegration?: boolean;
+  chartsModel?: GridChartsModel;
+  onChartsModelChange?: (model: GridChartsModel) => void;
   /** Removes the pivot button from the toolbar and ignores `pivotActive`. */
   disablePivoting?: boolean;
   /**

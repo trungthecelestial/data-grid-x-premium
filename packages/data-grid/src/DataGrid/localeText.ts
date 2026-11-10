@@ -1,4 +1,5 @@
 import type { GridLocaleText } from './DataGrid.types';
+import { MAX_CHART_CATEGORIES } from './features/charts';
 
 export const DEFAULT_LOCALE_TEXT: GridLocaleText = {
   noRowsLabel: 'No rows',
@@ -79,6 +80,18 @@ export const DEFAULT_LOCALE_TEXT: GridLocaleText = {
   columnMenuUnpin: 'Unpin',
   headerFilterOperator: 'Operator',
   toolbarPivot: 'Pivot',
+  toolbarCharts: 'Charts',
+  chartsPanelTitle: 'Charts',
+  chartsType: 'Chart type',
+  chartsCategory: 'Category',
+  chartsSeries: 'Series',
+  chartsNoSeries: 'Pick at least one number column to chart.',
+  chartsNoData: 'No data to chart.',
+  chartsTruncated: () => `Showing the first ${MAX_CHART_CATEGORIES} categories`,
+  chartsDownload: 'Download SVG',
+  chartsAutoCategory: 'Auto',
+  chartsScatterNeedsTwo: 'Scatter plots the first series against the second. Pick two.',
+  chartTypeLabel: (type) => ({ column: 'Column', bar: 'Bar', line: 'Line', area: 'Area', pie: 'Pie', scatter: 'Scatter' })[type],
   pivotPanelActive: 'Pivot table',
   pivotRows: 'Rows',
   pivotColumns: 'Columns',

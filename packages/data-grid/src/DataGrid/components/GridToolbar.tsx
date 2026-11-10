@@ -1,6 +1,7 @@
 import ClearIcon from '@mui/icons-material/Clear';
 import FileDownloadIcon from '@mui/icons-material/FileDownload';
 import FilterListIcon from '@mui/icons-material/FilterList';
+import BarChartIcon from '@mui/icons-material/BarChart';
 import PivotTableChartIcon from '@mui/icons-material/PivotTableChart';
 import RedoIcon from '@mui/icons-material/Redo';
 import UndoIcon from '@mui/icons-material/Undo';
@@ -48,6 +49,7 @@ export function GridToolbar<R extends GridValidRowModel = GridValidRowModel>(pro
     disableQuickFilter,
     disableExport,
     onOpenPivotPanel,
+    onOpenChartsPanel,
     pivotActive = false,
     onUndo,
     onRedo,
@@ -118,6 +120,11 @@ export function GridToolbar<R extends GridValidRowModel = GridValidRowModel>(pro
           onClick={(event) => onOpenPivotPanel(event.currentTarget)}
         >
           {localeText.toolbarPivot}
+        </Button>
+      )}
+      {onOpenChartsPanel && (
+        <Button size="small" color="inherit" sx={buttonSx} startIcon={<BarChartIcon />} onClick={(event) => onOpenChartsPanel(event.currentTarget)}>
+          {localeText.toolbarCharts}
         </Button>
       )}
       {!disableExport && (

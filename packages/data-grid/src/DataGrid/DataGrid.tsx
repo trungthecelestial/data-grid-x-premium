@@ -43,6 +43,16 @@ import {
 import { GridCellEditor } from './components/GridCellEditor';
 import { GridColumnMenu } from './components/GridColumnMenu';
 import { GridPivotPanel } from './components/GridPivotPanel';
+import { GridChartsPanel } from './components/GridChartsPanel';
+import {
+  EMPTY_CHARTS_MODEL,
+  buildChartData,
+  getChartCategoryColumns,
+  getChartSeriesColumns,
+  getRowChartPoints,
+  sanitizeChartsModel,
+  type GridChartPoint,
+} from './features/charts';
 import { GridColumnsPanel } from './components/GridColumnsPanel';
 import { GridFilterPanel } from './components/GridFilterPanel';
 import { GridHeaderFilterCell } from './components/GridHeaderFilterCell';
@@ -69,6 +79,9 @@ import type {
   GridFilterPanelSlotProps,
   GridPivotModel,
   GridPivotPanelSlotProps,
+  GridChartsPanelSlotProps,
+  GridChartData,
+  GridChartsModel,
   GridInitialState,
   GridPaginationModel,
   GridPinnedColumns,
@@ -120,6 +133,7 @@ import { buildCsv, buildPrintHtml, downloadFile, printHtml } from './features/ex
 import { buildXlsx, XLSX_MIME_TYPE, type XlsxEntry } from './features/xlsx';
 import { countActiveFilters, getColumnFilterOperators, getFilterPredicate, getInitialFilterValue, isFilterable } from './features/filtering';
 import { applySortClick, DEFAULT_SORTING_ORDER, getRowComparator } from './features/sorting';
+import { toChartNumber } from './features/charts';
 import { collectLeafRows, collectRows, flattenTree, type GridTreeNode } from './features/tree';
 import { useElementSize } from './hooks/useElementSize';
 import { useGridRows } from './hooks/useGridRows';
@@ -470,8 +484,14 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     initialState?.rowGrouping?.model ?? EMPTY_STRINGS,
     props.onRowGroupingModelChange as ((model: readonly string[]) => void) | undefined,
   );
+  const [storedChartsModel, setChartsModel] = useGridState<GridChartsModel>(
+    props.chartsModel,
+    initialState?.charts?.model ?? EMPTY_CHARTS_MODEL,
+    props.onChartsModelChange,
+  );
+  const chartsEnabled = Boolean(props.chartsIntegration);
   const [columnMenu, setColumnMenu] = useState<{ field: string; anchor: HTMLElement } | null>(null);
-  const [menuPanel, setMenuPanel] = useState<{ kind: 'filter' | 'columns' | 'pivot'; anchor: HTMLElement } | null>(null);
+  const [menuPanel, setMenuPanel] = useState<{ kind: 'filter' | 'columns' | 'pivot' | 'charts'; anchor: HTMLElement } | null>(null);
 
   const [columnOrder, setColumnOrder] = useState<string[]>(
     () => initialState?.columns?.orderedFields ?? userColumns.map((column) => column.field),
@@ -1414,6 +1434,46 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     [visibleUserColumns, pivotLabelColumn],
   );
 
+  const chartSeriesColumns = useMemo(() => getChartSeriesColumns(userColumns), [userColumns]);
+  const chartCategoryColumns = useMemo(() => getChartCategoryColumns(userColumns), [userColumns]);
+  const chartsModel = useMemo(
+    () =>
+      sanitizeChartsModel(
+        storedChartsModel,
+        new Set(chartSeriesColumns.map((column) => column.field)),
+        new Set(chartCategoryColumns.map((column) => column.field)),
+      ),
+    [storedChartsModel, chartSeriesColumns, chartCategoryColumns],
+  );
+  // Computed while the panel shows or when the api asks, because it walks every row.
+  const computeChartData = (): GridChartData => {
+    const labelOf = (field: string) => userColumnMap.get(field)?.headerName ?? field;
+    if (isGroup && !isPivoted) {
+      const points: GridChartPoint[] = roots
+        .filter((node) => !node.placeholder)
+        .map((node) => {
+          const aggregates = nodeAggregates.get(node.id);
+          return {
+            label: node.label,
+            get: (field) => {
+              const aggregated = aggregates?.[field];
+              if (aggregated !== undefined && aggregated !== null) {
+                return aggregated;
+              }
+              const column = userColumnMap.get(field);
+              return column ? collectLeafRows(node).reduce((sum, row) => sum + (toChartNumber(getCellValue(row, column)) ?? 0), 0) : undefined;
+            },
+          };
+        });
+      return buildChartData(points, chartsModel, labelOf, { merge: false });
+    }
+    const category = chartsModel.categoryField ? userColumnMap.get(chartsModel.categoryField) : chartCategoryColumns[0];
+    return buildChartData(getRowChartPoints(filteredRows, userColumnMap, category), chartsModel, labelOf, { merge: category !== undefined });
+  };
+  const chartsPanelOpen = chartsEnabled && menuPanel?.kind === 'charts';
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const chartData = useMemo(() => (chartsPanelOpen ? computeChartData() : null), [chartsPanelOpen, chartsModel, filteredRows, roots, nodeAggregates, userColumnMap, isGroup, isPivoted, chartCategoryColumns]);
+
   const apiObjectRef = useRef<GridApi | null>(null);
   const internalApiRef = useRef({} as GridApi);
 
@@ -2288,6 +2348,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
       aggregation: { model: aggregationModel },
       rowGrouping: { model: rowGroupingModel as string[] },
       pivoting: { active: pivoting?.enabled ?? false, model: pivoting?.model ?? EMPTY_PIVOT_MODEL },
+      charts: { model: chartsModel },
       detailPanel: { expandedRowIds: detailIds as GridRowId[] },
       editing: editing ? { id: editing.id, field: editing.field ?? null, values: editing.values } : null,
       focus: {
@@ -2304,7 +2365,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     [
       allRowIds, paginationMode, rowCount, rootCount, rowsLookup, sortModel, sortedRowIds, filterModel, filteredRowIds, paginationModel,
       visibleRowIds, orderedFields, visibilityModel, columnLookup, visibleFields, dimensions, pinned, density, selection, cellSelection,
-      aggregationModel, rowGroupingModel, pivoting?.enabled, pivoting?.model, detailIds, editing, focusedCellId, focusedCellField,
+      aggregationModel, rowGroupingModel, pivoting?.enabled, pivoting?.model, chartsModel, detailIds, editing, focusedCellId, focusedCellField,
       focusedHeaderField, headerFocusCol, menuPanel, columnMenu,
     ],
   );
@@ -2388,6 +2449,11 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     setPivotActive: (active) => pivoting?.setEnabled(active),
     getPivotModel: () => pivoting?.model ?? EMPTY_PIVOT_MODEL,
     setPivotModel: (model) => pivoting?.setModel(model),
+    getChartsModel: () => chartsModel,
+    setChartsModel: (model) => {
+      if (chartsEnabled) setChartsModel(model);
+    },
+    getChartData: () => computeChartData(),
     resetRowHeights: resetHeights,
     toggleDetailPanel: toggleDetail,
     getExpandedDetailPanels: () => [...detailIds],
@@ -2652,6 +2718,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
       // While pivoting these hold generated values. The user's own stay in place for when pivoting ends.
       ...(isPivoted ? {} : { aggregation: { model: aggregationModel }, rowGrouping: { model: [...rowGroupingModel] } }),
       ...(pivoting ? { pivoting: { enabled: pivoting.enabled, model: pivoting.model } } : {}),
+      ...(chartsEnabled ? { charts: { model: chartsModel } } : {}),
     }),
     restoreState: (state: GridInitialState) => {
       if (state.sorting?.sortModel) setSortModel(state.sorting.sortModel);
@@ -2669,6 +2736,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
       if (state.rowGrouping?.model) setRowGroupingModel([...state.rowGrouping.model]);
       if (state.pivoting?.enabled !== undefined) pivoting?.setEnabled(state.pivoting.enabled);
       if (state.pivoting?.model) pivoting?.setModel(state.pivoting.model);
+      if (state.charts?.model && chartsEnabled) setChartsModel(state.charts.model);
     },
     subscribeEvent: (event, handler) => {
       const listeners = listenersRef.current.get(event) ?? new Set<EventListener>();
@@ -3788,6 +3856,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
     filterColumns: pivoting?.sourceColumns,
     onOpenPivotPanel: pivoting ? (anchor: HTMLElement) => setMenuPanel({ kind: 'pivot', anchor }) : undefined,
     pivotActive: pivoting?.enabled,
+    onOpenChartsPanel: chartsEnabled ? (anchor: HTMLElement) => setMenuPanel({ kind: 'charts', anchor }) : undefined,
     ...(historyStackSize > 0 && !isPivoted
       ? { onUndo: () => void applyHistory('undo'), onRedo: () => void applyHistory('redo'), canUndo, canRedo }
       : {}),
@@ -3797,6 +3866,7 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
   const FilterPanel: ComponentType<GridFilterPanelSlotProps<any>> = slots?.filterPanel ?? GridFilterPanel;
   const ColumnsPanel: ComponentType<GridColumnsPanelSlotProps<any>> = slots?.columnsPanel ?? GridColumnsPanel;
   const PivotPanel: ComponentType<GridPivotPanelSlotProps<any>> = slots?.pivotPanel ?? GridPivotPanel;
+  const ChartsPanel: ComponentType<GridChartsPanelSlotProps<any>> = slots?.chartsPanel ?? GridChartsPanel;
   const NoRowsOverlay = slots?.noRowsOverlay;
   const LoadingOverlay = slots?.loadingOverlay;
   const FooterSlot = slots?.footer;
@@ -3865,6 +3935,18 @@ function DataGridBase<R extends GridValidRowModel = GridValidRowModel>(props: Da
             onColumnVisibilityModelChange={setVisibilityModel}
             localeText={localeText}
             {...slotProps?.columnsPanel}
+          />
+        )}
+        {chartsPanelOpen && chartData && (
+          <ChartsPanel
+            seriesColumns={chartSeriesColumns}
+            categoryColumns={chartCategoryColumns}
+            grouped={isGroup && !isPivoted}
+            model={chartsModel}
+            onModelChange={setChartsModel}
+            data={chartData}
+            localeText={localeText}
+            {...slotProps?.chartsPanel}
           />
         )}
         {menuPanel?.kind === 'pivot' && pivoting && (
